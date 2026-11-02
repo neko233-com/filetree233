@@ -5,6 +5,7 @@ mod gui;
 mod mft;
 #[cfg(any(windows, test))]
 mod mft_index;
+mod plan_fingerprint;
 mod recommend;
 mod recycle;
 mod tree;
@@ -191,9 +192,9 @@ fn walk(
         ));
     }
     let relative = path.strip_prefix(&s.path).map_err(err)?;
-    let name = relative.to_string_lossy();
-    hasher.update((name.len() as u64).to_le_bytes());
-    hasher.update(name.as_bytes());
+    plan_fingerprint::hash_name(hasher, relative.as_os_str());
+    plan_fingerprint::hash_identity(hasher, path, &m)
+        .map_err(|e| format!("{}: identity: {e}", path.display()))?;
     hasher.update(m.len().to_le_bytes());
     let modified = m
         .modified()
@@ -541,7 +542,7 @@ fn make_plan(paths: &[PathBuf], output: &Path) -> Result<Plan, String> {
             .ok_or("allocation overflow")
     })?;
     Ok(Plan {
-        version: 3,
+        version: 4,
         mode: Some(CleanupMode::Permanent),
         targets,
         total_bytes,
@@ -567,8 +568,8 @@ fn save_plan_mode(paths: &[PathBuf], output: &Path, mode: CleanupMode) -> Result
 fn read_checked_plan(path: &Path) -> Result<(Vec<u8>, Plan), String> {
     let data = fs::read(path).map_err(err)?;
     let plan: Plan = serde_json::from_slice(&data).map_err(err)?;
-    if !matches!((plan.version, plan.mode), (2, None) | (3, Some(_))) || plan.targets.is_empty() {
-        return Err("invalid plan version or empty plan".into());
+    if plan.version != 4 || plan.mode.is_none() || plan.targets.is_empty() {
+        return Err("unsupported or incomplete plan; create a new version 4 plan".into());
     }
     let paths: Vec<_> = plan.targets.iter().map(|s| s.path.clone()).collect();
     let current = make_plan(&paths, path)?;
@@ -911,21 +912,45 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"recoverable demo");
     }
     #[test]
-    fn accepts_legacy_plan_as_permanent_but_requires_mode_in_v3() {
+    fn rejects_legacy_or_incomplete_plans() {
         let f = Fixture::new();
         let target = f.0.join("target");
         fs::write(&target, b"demo").unwrap();
         let path = f.0.join("plan.json");
         save_plan_mode(std::slice::from_ref(&target), &path, CleanupMode::Permanent).unwrap();
         let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for version in [2, 3] {
+            value["version"] = json!(version);
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(read_checked_plan(&path).is_err());
+        }
+        value["version"] = json!(4);
         value.as_object_mut().unwrap().remove("mode");
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(read_checked_plan(&path).is_err());
-        value["version"] = json!(2);
-        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-        let (data, plan) = read_checked_plan(&path).unwrap();
-        assert!(plan_description(&data, &plan).1.starts_with("DELETE "));
         assert!(target.exists());
+    }
+    #[test]
+    fn rejects_replacement_with_same_length_and_modified_time() {
+        let f = Fixture::new();
+        let target = f.0.join("target");
+        let replacement = f.0.join("replacement");
+        let path = f.0.join("plan.json");
+        fs::write(&target, b"old-data").unwrap();
+        fs::write(&replacement, b"new-data").unwrap();
+        let original_modified =
+            filetime::FileTime::from_last_modification_time(&fs::metadata(&target).unwrap());
+        filetime::set_file_mtime(&replacement, original_modified).unwrap();
+        save_plan_mode(std::slice::from_ref(&target), &path, CleanupMode::Permanent).unwrap();
+        let data = fs::read(&path).unwrap();
+        fs::remove_file(&target).unwrap();
+        fs::rename(&replacement, &target).unwrap();
+        assert_eq!(
+            filetime::FileTime::from_last_modification_time(&fs::metadata(&target).unwrap()),
+            original_modified
+        );
+        assert!(delete_checked(&path, &data).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"new-data");
     }
     #[test]
     fn plan_tracks_nested_bytes_and_detects_changes() {
