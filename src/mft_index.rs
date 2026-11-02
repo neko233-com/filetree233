@@ -73,6 +73,13 @@ impl Index {
         }
         for id in &ids {
             let id = *id;
+            let reparse_parent = self.dirs.get(&id).filter(|d| d.reparse).map(|d| d.parent);
+            if let Some(parent) = reparse_parent
+                && let Some(top) = self.owner(parent)
+                && let Some(name) = self.names.get(&top)
+            {
+                self.rows.entry(name.clone()).or_default().reparse = true;
+            }
             if let Some(top) = self.owner(id)
                 && let Some(name) = self.names.get(&top)
             {
@@ -162,6 +169,23 @@ impl Index {
         self.allocation_unknown += 1;
         self.add_file_impl(links, logical, 0, Some(error));
     }
+    pub fn add_reparse_file(&mut self, links: &[Link]) {
+        if let Some(tree) = &mut self.snapshot {
+            tree.add_reparse_file(links);
+            return;
+        }
+        for link in links {
+            let name = if link.parent == self.root {
+                Some(link.name.clone())
+            } else {
+                self.owner(link.parent)
+                    .and_then(|id| self.names.get(&id).cloned())
+            };
+            if let Some(name) = name {
+                self.rows.entry(name).or_default().reparse = true;
+            }
+        }
+    }
     fn add_file_impl(&mut self, links: &[Link], logical: u64, allocated: u64, error: Option<&str>) {
         if let Some(tree) = &mut self.snapshot {
             tree.add_file(links, logical, allocated, error);
@@ -241,11 +265,11 @@ impl TreeBuilder {
         allocated: u64,
     ) -> u32 {
         let mut node = crate::tree::Node::new(name.into(), parent);
-        node.is_dir = is_dir;
+        node.is_dir = is_dir && !reparse;
         node.logical = logical;
         node.allocated = allocated;
-        node.files = u64::from(!is_dir);
-        node.directories = u64::from(is_dir);
+        node.files = u64::from(!is_dir && !reparse);
+        node.directories = u64::from(is_dir && !reparse);
         if reparse {
             node.complete = false;
             node.error = Some("MFT reparse point skipped".into());
@@ -337,6 +361,15 @@ impl TreeBuilder {
             assigned = true;
         }
     }
+    fn add_reparse_file(&mut self, links: &[Link]) {
+        for link in links {
+            if let Some(&parent) = self.ids.get(&link.parent)
+                && self.nodes[parent as usize].error.as_deref() != Some("MFT reparse point skipped")
+            {
+                self.add_node(parent, &link.name, false, true, 0, 0);
+            }
+        }
+    }
     fn finish(self, root: &Path) -> crate::tree::Snapshot {
         let mut snapshot = crate::tree::finalize(root.to_path_buf(), self.nodes);
         snapshot.engine = "mft_fast";
@@ -358,6 +391,41 @@ mod tests {
         Link {
             parent,
             name: name.into(),
+        }
+    }
+    #[test]
+    fn reparses_are_visible_but_never_counted_or_followed() {
+        let mut idx = Index::new(5);
+        idx.enable_snapshot();
+        idx.add_directory(dir(10, 5, "a", false));
+        idx.add_directory(dir(11, 10, "junction", true));
+        idx.add_directory(dir(12, 11, "hidden", false));
+        idx.finish_directories();
+        idx.add_reparse_file(&[
+            link(5, "root-link"),
+            link(10, "nested-link"),
+            link(12, "hidden-link"),
+        ]);
+        let tree = idx.finish_snapshot(Path::new("/demo"));
+        assert_eq!(tree.nodes[0].directories, 2);
+        assert_eq!(tree.nodes[0].files, 0);
+        for name in ["junction", "root-link", "nested-link"] {
+            let node = tree.nodes.iter().find(|n| n.name == name).unwrap();
+            assert!(!node.is_dir && !node.complete);
+            assert_eq!(node.files, 0);
+            assert_eq!(node.directories, 0);
+            assert_eq!(node.error.as_deref(), Some("MFT reparse point skipped"));
+        }
+        assert!(!tree.nodes.iter().any(|n| n.name == "hidden-link"));
+        let mut idx = Index::new(5);
+        idx.add_directory(dir(10, 5, "a", false));
+        idx.add_directory(dir(11, 10, "junction", true));
+        idx.finish_directories();
+        idx.add_reparse_file(&[link(5, "root-link"), link(10, "nested-link")]);
+        let report = idx.finish(Path::new("/demo"));
+        for row in report["entries"].as_array().unwrap() {
+            assert_eq!(row["errors"][0], "MFT reparse point skipped");
+            assert_eq!(row["files"], 0);
         }
     }
     #[test]

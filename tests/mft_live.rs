@@ -96,6 +96,8 @@ fn live_ntfs_volume_finds_created_demo_file() {
     fs::write(demo.join("alpha/nested/data"), vec![1u8; 32768]).unwrap();
     fs::hard_link(demo.join("alpha/nested/data"), demo.join("beta/hardlink")).unwrap();
     fs::write(demo.join("root-file"), vec![2u8; 8192]).unwrap();
+    std::os::windows::fs::symlink_file(demo.join("root-file"), demo.join("file-symlink"))
+        .expect("create demo file symlink");
     // Aggregation counts the unnamed stream only; the MFT inspector still
     // exposes named streams. A named stream must not change its base size.
     fs::write(demo.join("root-file:alternate"), vec![7u8; 16384]).unwrap();
@@ -193,6 +195,7 @@ fn live_ntfs_volume_finds_created_demo_file() {
         "beta",
         "empty",
         "root-file",
+        "file-symlink",
         "sparse.bin",
         "compressed.bin",
         "outside",
@@ -281,6 +284,19 @@ fn live_ntfs_volume_finds_created_demo_file() {
             .sum::<u64>()
     );
     assert_eq!(rows[0]["allocated_bytes"], walk["total_allocated_bytes"]);
+    let link_node = entries
+        .iter()
+        .find(|entry| entry["name"] == "file-symlink")
+        .unwrap();
+    assert_eq!(link_node["complete"], false);
+    assert_eq!(link_node["files"], 0);
+    assert_eq!(link_node["error"], "MFT reparse point skipped");
+    let junction_node = entries
+        .iter()
+        .find(|entry| entry["name"] == "junction")
+        .unwrap();
+    assert_eq!(junction_node["directories"], 0);
+    assert_eq!(junction_node["complete"], false);
     let measure = |threads: &str| {
         let result = Command::new(env!("CARGO_BIN_EXE_filetree233"))
             .arg("bench-once")

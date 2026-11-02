@@ -391,7 +391,7 @@ fn scan_index(
             return Err("scan cancelled".into());
         }
         progress.fetch_add(1, Ordering::Relaxed);
-        if entry.is_directory || entry.is_reparse_point {
+        if entry.is_directory {
             return Ok(());
         }
         let mut links = Vec::new();
@@ -423,6 +423,10 @@ fn scan_index(
             }
         }
         if links.is_empty() {
+            return Ok(());
+        }
+        if entry.is_reparse_point {
+            index.add_reparse_file(&links);
             return Ok(());
         }
         // Only materialize a full path when special allocation needs a Win32 query.
