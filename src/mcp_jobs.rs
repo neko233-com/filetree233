@@ -1,7 +1,7 @@
 //! Bounded asynchronous MCP analysis jobs.
 use crate::{
-    ScanEngine, duplicates, native_path, recommend, scan_dispatch_controlled, scan_full_tree,
-    search, tree,
+    CleanupMode, ScanEngine, duplicates, native_path, recommend, save_plan_controlled,
+    scan_dispatch_controlled, scan_full_tree, search, tree,
 };
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -12,6 +12,22 @@ pub fn run(
     stop: &AtomicBool,
     progress: &AtomicU64,
 ) -> Result<Value, String> {
+    if name == "plan" {
+        let paths = args["paths"]
+            .as_array()
+            .ok_or("paths required")?
+            .iter()
+            .map(native_path::from_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = native_path::from_value(&args["output"])?;
+        let mode = match args.get("mode") {
+            None => CleanupMode::Recycle,
+            Some(Value::String(s)) if s == "recycle" => CleanupMode::Recycle,
+            Some(Value::String(s)) if s == "permanent" => CleanupMode::Permanent,
+            _ => return Err("invalid cleanup mode".into()),
+        };
+        return save_plan_controlled(&paths, &output, mode, stop);
+    }
     let path = native_path::from_value(&args["path"])?;
     let number = |key: &str, default: u64| -> Result<u64, &str> {
         match args.get(key) {

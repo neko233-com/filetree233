@@ -157,9 +157,9 @@ fn cancelled_analysis_keeps_server_responsive_and_releases_slot() {
     let mut input = proc.stdin.take().unwrap();
     let mut output = BufReader::new(proc.stdout.take().unwrap());
     let export_path = root.with_extension("jsonl");
-    for name in ["scan", "tree", "search", "recommend", "duplicates"] {
+    for name in ["scan", "tree", "search", "recommend", "duplicates", "plan"] {
         for message in [
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{"path":root,"output":export_path,"query":"file","threads":1}}}),
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{"path":root,"paths":[root],"output":export_path,"query":"file","threads":1}}}),
             json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}),
             json!({"jsonrpc":"2.0","id":2,"method":"ping"}),
         ] {
@@ -191,6 +191,50 @@ fn cancelled_analysis_keeps_server_responsive_and_releases_slot() {
     assert!(root.join("file-00000").exists());
     assert!(!export_path.exists());
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn mcp_plan_reports_sizes_and_writes_a_complete_non_destructive_plan() {
+    let base = std::env::temp_dir().join(format!(
+        "filetree233-mcp-plan-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let target = base.join("target");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("file"), b"12345").unwrap();
+    let plan = base.join("plan.json");
+    let mut proc = Command::new(env!("CARGO_BIN_EXE_filetree233"))
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = proc.stdin.take().unwrap();
+    let mut output = BufReader::new(proc.stdout.take().unwrap());
+    writeln!(input, "{}", json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"plan","arguments":{"paths":[target],"output":plan}}})).unwrap();
+    input.flush().unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let saved: Value = serde_json::from_slice(&fs::read(&plan).unwrap()).unwrap();
+    assert_eq!(saved["total_bytes"], 5);
+    assert_eq!(saved["targets"][0]["files"], 1);
+    assert_eq!(saved["mode"], "recycle");
+    assert!(target.join("file").exists());
+    let original = fs::read(&plan).unwrap();
+    writeln!(input, "{}", json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"plan","arguments":{"paths":[target],"output":plan}}})).unwrap();
+    input.flush().unwrap();
+    line.clear();
+    output.read_line(&mut line).unwrap();
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(fs::read(&plan).unwrap(), original);
+    assert!(target.join("file").exists());
+    drop(input);
+    assert!(proc.wait().unwrap().success());
+    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]

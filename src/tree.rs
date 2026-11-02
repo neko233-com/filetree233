@@ -495,6 +495,19 @@ fn publish_export(
         .map_err(|e| e.to_string())?;
     Ok(())
 }
+pub fn publish_bytes(output: &Path, bytes: &[u8], cancelled: &AtomicBool) -> Result<(), String> {
+    use std::io::Write;
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let destination = fs::canonicalize(parent)
+        .map_err(|e| e.to_string())?
+        .join(output.file_name().ok_or("invalid output path")?);
+    publish_export(&destination, cancelled, |writer| {
+        writer.write_all(bytes).map_err(|e| e.to_string())
+    })
+}
 pub fn save_tree(
     path: &Path,
     output: &Path,

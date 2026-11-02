@@ -213,7 +213,11 @@ fn walk(
     hasher: &mut Sha256,
     s: &mut Summary,
     seen_links: &mut std::collections::HashSet<allocation::FileId>,
+    cancelled: &AtomicBool,
 ) -> Result<(), String> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("plan cancelled".into());
+    }
     let m = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if m.file_type().is_symlink() || is_reparse(&m) {
         return Err(format!(
@@ -236,13 +240,16 @@ fn walk(
     if m.is_dir() {
         hasher.update(b"d");
         s.directories += 1;
-        let mut children = fs::read_dir(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(err)?;
+        let mut children = Vec::new();
+        for entry in fs::read_dir(path).map_err(|e| format!("{}: {e}", path.display()))? {
+            if cancelled.load(Ordering::Relaxed) {
+                return Err("plan cancelled".into());
+            }
+            children.push(entry.map_err(err)?);
+        }
         children.sort_by_key(|e| e.file_name());
         for child in children {
-            walk(&child.path(), hasher, s, seen_links)?;
+            walk(&child.path(), hasher, s, seen_links, cancelled)?;
         }
     } else if m.is_file() {
         hasher.update(b"f");
@@ -264,6 +271,7 @@ fn walk(
 fn summarize(
     path: &Path,
     seen_links: &mut std::collections::HashSet<allocation::FileId>,
+    cancelled: &AtomicBool,
 ) -> Result<Summary, String> {
     let path = check_target(path)?;
     let mut s = Summary {
@@ -275,7 +283,7 @@ fn summarize(
         fingerprint: String::new(),
     };
     let mut hasher = Sha256::new();
-    walk(&path, &mut hasher, &mut s, seen_links)?;
+    walk(&path, &mut hasher, &mut s, seen_links, cancelled)?;
     s.fingerprint = format!("{:x}", hasher.finalize());
     Ok(s)
 }
@@ -573,6 +581,16 @@ fn scan_dispatch_controlled(
     }
 }
 fn make_plan(paths: &[PathBuf], output: &Path) -> Result<Plan, String> {
+    make_plan_controlled(paths, output, &AtomicBool::new(false))
+}
+fn make_plan_controlled(
+    paths: &[PathBuf],
+    output: &Path,
+    cancelled: &AtomicBool,
+) -> Result<Plan, String> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("plan cancelled".into());
+    }
     if paths.is_empty() {
         return Err("at least one target required".into());
     }
@@ -587,6 +605,9 @@ fn make_plan(paths: &[PathBuf], output: &Path) -> Result<Plan, String> {
     let mut targets = Vec::new();
     let mut seen_links = std::collections::HashSet::new();
     for p in paths {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("plan cancelled".into());
+        }
         let target = check_target(p)?;
         if cwd.starts_with(&target) {
             return Err(format!(
@@ -603,7 +624,7 @@ fn make_plan(paths: &[PathBuf], output: &Path) -> Result<Plan, String> {
         {
             return Err("overlapping targets are not allowed".into());
         }
-        targets.push(summarize(&target, &mut seen_links)?);
+        targets.push(summarize(&target, &mut seen_links, cancelled)?);
     }
     let total_bytes = targets
         .iter()
@@ -625,17 +646,21 @@ fn save_plan(paths: &[PathBuf], output: &Path) -> Result<Value, String> {
     save_plan_mode(paths, output, CleanupMode::Permanent)
 }
 fn save_plan_mode(paths: &[PathBuf], output: &Path, mode: CleanupMode) -> Result<Value, String> {
-    let mut plan = make_plan(paths, output)?;
+    save_plan_controlled(paths, output, mode, &AtomicBool::new(false))
+}
+fn save_plan_controlled(
+    paths: &[PathBuf],
+    output: &Path,
+    mode: CleanupMode,
+    cancelled: &AtomicBool,
+) -> Result<Value, String> {
+    let mut plan = make_plan_controlled(paths, output, cancelled)?;
     plan.mode = Some(mode);
     let data = serde_json::to_vec_pretty(&plan).map_err(err)?;
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output)
-        .map_err(err)?;
-    f.write_all(&data).map_err(err)?;
+    tree::publish_bytes(output, &data, cancelled)?;
     Ok(json!({"plan_file":native_path::value(output),"plan":plan}))
 }
+
 fn read_checked_plan(path: &Path) -> Result<(Vec<u8>, Plan), String> {
     let data = fs::read(path).map_err(err)?;
     let plan: Plan = serde_json::from_slice(&data).map_err(err)?;
@@ -833,14 +858,14 @@ fn serve() -> Result<(), String> {
             "tools/call" => {
                 let args = &req["params"]["arguments"];
                 let name = req["params"]["name"].as_str().unwrap_or("");
-                if active.is_some() && matches!(name, "benchmark" | "plan" | "apply") {
+                if active.is_some() && matches!(name, "benchmark" | "apply") {
                     tool_result(
                         id,
                         Err("another analysis is running; retry after it finishes".into()),
                     )
                 } else if matches!(
                     name,
-                    "scan" | "tree" | "search" | "recommend" | "duplicates"
+                    "scan" | "tree" | "search" | "recommend" | "duplicates" | "plan"
                 ) {
                     if active.is_some() || pending.is_some() {
                         tool_result(
@@ -897,7 +922,6 @@ fn serve() -> Result<(), String> {
                         "volumes" => volumes::list_json(),
                         "capacity" => (|| { let path=native_path::from_value(&args["path"])?; volumes::capacity(&path) })(),
                         "benchmark" => (|| { let path=native_path::from_value(&args["path"])?; let n=|key: &str, default: u8| -> Result<u8, &str> { match args.get(key) { None => Ok(default), Some(v) => u8::try_from(v.as_u64().ok_or("invalid numeric argument")?).map_err(|_| "invalid numeric argument") } }; let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; benchmark::run(&path, n("threads",4)?, engine, n("iterations",3)?) })(),
-                        "plan" => (|| { let paths = args["paths"].as_array().ok_or("paths required")?.iter().map(native_path::from_value).collect::<Result<Vec<_>,_>>()?; let out = native_path::from_value(&args["output"])?; { let mode = match args.get("mode") { None => CleanupMode::Recycle, Some(Value::String(name)) if name == "recycle" => CleanupMode::Recycle, Some(Value::String(name)) if name == "permanent" => CleanupMode::Permanent, _ => return Err("invalid cleanup mode".into()) }; save_plan_mode(&paths, &out, mode) } })(),
                         "apply" => Err("client must support human elicitation, and only one confirmation can be pending".into()),
                         _ => Err("unknown tool".into())
                     };
