@@ -1,3 +1,4 @@
+mod allocation;
 mod gui;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,7 @@ enum Command {
 struct Summary {
     path: PathBuf,
     bytes: u64,
+    allocated_attributed_bytes: u64,
     files: u64,
     directories: u64,
     fingerprint: String,
@@ -51,6 +53,7 @@ struct Plan {
     version: u32,
     targets: Vec<Summary>,
     total_bytes: u64,
+    total_allocated_bytes: u64,
 }
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -81,7 +84,12 @@ fn is_reparse(m: &fs::Metadata) -> bool {
 fn is_reparse(_: &fs::Metadata) -> bool {
     false
 }
-fn walk(path: &Path, hasher: &mut Sha256, s: &mut Summary) -> Result<(), String> {
+fn walk(
+    path: &Path,
+    hasher: &mut Sha256,
+    s: &mut Summary,
+    seen_links: &mut std::collections::HashSet<allocation::FileId>,
+) -> Result<(), String> {
     let m = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if m.file_type().is_symlink() || is_reparse(&m) {
         return Err(format!(
@@ -110,10 +118,18 @@ fn walk(path: &Path, hasher: &mut Sha256, s: &mut Summary) -> Result<(), String>
             .map_err(err)?;
         children.sort_by_key(|e| e.file_name());
         for child in children {
-            walk(&child.path(), hasher, s)?;
+            walk(&child.path(), hasher, s, seen_links)?;
         }
     } else if m.is_file() {
         hasher.update(b"f");
+        let allocation = allocation::file_allocation(path, &m)
+            .map_err(|e| format!("{}: allocation: {e}", path.display()))?;
+        if allocation.shared_id.is_none_or(|id| seen_links.insert(id)) {
+            s.allocated_attributed_bytes = s
+                .allocated_attributed_bytes
+                .checked_add(allocation.bytes)
+                .ok_or("allocation overflow")?;
+        }
         s.files += 1;
         s.bytes = s.bytes.checked_add(m.len()).ok_or("size overflow")?;
     } else {
@@ -121,71 +137,137 @@ fn walk(path: &Path, hasher: &mut Sha256, s: &mut Summary) -> Result<(), String>
     }
     Ok(())
 }
-fn summarize(path: &Path) -> Result<Summary, String> {
+fn summarize(
+    path: &Path,
+    seen_links: &mut std::collections::HashSet<allocation::FileId>,
+) -> Result<Summary, String> {
     let path = check_target(path)?;
     let mut s = Summary {
         path: path.clone(),
         bytes: 0,
+        allocated_attributed_bytes: 0,
         files: 0,
         directories: 0,
         fingerprint: String::new(),
     };
     let mut hasher = Sha256::new();
-    walk(&path, &mut hasher, &mut s)?;
+    walk(&path, &mut hasher, &mut s, seen_links)?;
     s.fingerprint = format!("{:x}", hasher.finalize());
     Ok(s)
 }
-fn analyze_entry(path: &Path) -> Value {
+const MAX_SCAN_ERRORS: usize = 50;
+fn analyze_entry(
+    path: &Path,
+    seen_links: &mut std::collections::HashSet<allocation::FileId>,
+) -> Value {
     let mut stack = vec![path.to_path_buf()];
-    let mut bytes = 0u64;
-    let mut files = 0u64;
-    let mut directories = 0u64;
+    let (mut bytes, mut allocated, mut files, mut directories, mut error_count, mut alloc_errors) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
     let mut errors = Vec::new();
+    let mut record_error = |text: String| {
+        error_count += 1;
+        if errors.len() < MAX_SCAN_ERRORS {
+            errors.push(text);
+        }
+    };
     while let Some(p) = stack.pop() {
         let m = match fs::symlink_metadata(&p) {
             Ok(m) => m,
             Err(e) => {
-                errors.push(format!("{}: {e}", p.display()));
+                record_error(format!("{}: {e}", p.display()));
                 continue;
             }
         };
         if m.file_type().is_symlink() || is_reparse(&m) {
-            errors.push(format!("{}: link/reparse point skipped", p.display()));
+            record_error(format!("{}: link/reparse point skipped", p.display()));
             continue;
         }
         if m.is_file() {
             bytes = bytes.saturating_add(m.len());
             files += 1;
+            match allocation::file_allocation(&p, &m) {
+                Ok(a) => {
+                    if a.shared_id.is_none_or(|id| seen_links.insert(id)) {
+                        allocated = allocated.saturating_add(a.bytes);
+                    }
+                }
+                Err(e) => {
+                    alloc_errors += 1;
+                    record_error(format!("{}: allocation: {e}", p.display()));
+                }
+            }
         } else if m.is_dir() {
             directories += 1;
             match fs::read_dir(&p) {
                 Ok(iter) => {
                     for entry in iter {
                         match entry {
-                            Ok(entry) => stack.push(entry.path()),
-                            Err(e) => errors.push(format!("{}: {e}", p.display())),
+                            Ok(entry) => {
+                                let child = entry.path();
+                                // Keep only directories on the pending stack; large flat directories need no file-sized queue.
+                                match entry.file_type() {
+                                    Ok(t) if t.is_file() => match fs::symlink_metadata(&child) {
+                                        Ok(m) if !is_reparse(&m) && m.is_file() => {
+                                            bytes = bytes.saturating_add(m.len());
+                                            files += 1;
+                                            match allocation::file_allocation(&child, &m) {
+                                                Ok(a) => {
+                                                    if a.shared_id
+                                                        .is_none_or(|id| seen_links.insert(id))
+                                                    {
+                                                        allocated =
+                                                            allocated.saturating_add(a.bytes);
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    alloc_errors += 1;
+                                                    record_error(format!(
+                                                        "{}: allocation: {e}",
+                                                        child.display()
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        Ok(_) => record_error(format!(
+                                            "{}: link/reparse point skipped",
+                                            child.display()
+                                        )),
+                                        Err(e) => record_error(format!("{}: {e}", child.display())),
+                                    },
+                                    Ok(_) => stack.push(child),
+                                    Err(e) => record_error(format!("{}: {e}", child.display())),
+                                }
+                            }
+                            Err(e) => record_error(format!("{}: {e}", p.display())),
                         }
                     }
                 }
-                Err(e) => errors.push(format!("{}: {e}", p.display())),
+                Err(e) => record_error(format!("{}: {e}", p.display())),
             }
         } else {
-            errors.push(format!("{}: unsupported entry", p.display()));
+            record_error(format!("{}: unsupported entry", p.display()));
         }
     }
-    json!({"path":path,"bytes":bytes,"files":files,"directories":directories,"complete":errors.is_empty(),"errors":errors})
+    drop(record_error);
+    json!({"path":path,"bytes":bytes,"allocated_attributed_bytes":allocated,"allocation_errors":alloc_errors,"files":files,"directories":directories,"complete":error_count == 0,"error_count":error_count,"errors":errors})
 }
 fn scan(path: &Path) -> Result<Value, String> {
     let root = fs::canonicalize(path).map_err(err)?;
     if !root.is_dir() {
         return Err("scan path must be a directory".into());
     }
+    let mut children = Vec::new();
     let mut entries = Vec::new();
     for entry in fs::read_dir(&root).map_err(err)? {
         match entry {
-            Ok(entry) => entries.push(analyze_entry(&entry.path())),
+            Ok(entry) => children.push(entry.path()),
             Err(e) => entries.push(json!({"error":e.to_string(),"complete":false})),
         }
+    }
+    children.sort();
+    let mut seen_links = std::collections::HashSet::new();
+    for child in children {
+        entries.push(analyze_entry(&child, &mut seen_links));
     }
     entries.sort_by(|a, b| {
         b["bytes"]
@@ -193,7 +275,13 @@ fn scan(path: &Path) -> Result<Value, String> {
             .unwrap_or(0)
             .cmp(&a["bytes"].as_u64().unwrap_or(0))
     });
-    Ok(json!({"root":root,"size_kind":"logical_bytes","entries":entries}))
+    let total_allocated_bytes: u64 = entries
+        .iter()
+        .filter_map(|v| v["allocated_attributed_bytes"].as_u64())
+        .fold(0u64, u64::saturating_add);
+    Ok(
+        json!({"root":root,"size_kind":"logical_bytes","allocation_kind":"unique_file_allocation_attributed_by_path","total_allocated_bytes":total_allocated_bytes,"complete":entries.iter().all(|v| v["complete"] == true),"entries":entries}),
+    )
 }
 fn make_plan(paths: &[PathBuf], output: &Path) -> Result<Plan, String> {
     if paths.is_empty() {
@@ -208,6 +296,7 @@ fn make_plan(paths: &[PathBuf], output: &Path) -> Result<Plan, String> {
         .join(output.file_name().ok_or("invalid plan path")?);
     let cwd = fs::canonicalize(std::env::current_dir().map_err(err)?).map_err(err)?;
     let mut targets = Vec::new();
+    let mut seen_links = std::collections::HashSet::new();
     for p in paths {
         let target = check_target(p)?;
         if cwd.starts_with(&target) {
@@ -225,15 +314,20 @@ fn make_plan(paths: &[PathBuf], output: &Path) -> Result<Plan, String> {
         {
             return Err("overlapping targets are not allowed".into());
         }
-        targets.push(summarize(&target)?);
+        targets.push(summarize(&target, &mut seen_links)?);
     }
     let total_bytes = targets
         .iter()
         .try_fold(0u64, |a, s| a.checked_add(s.bytes).ok_or("size overflow"))?;
+    let total_allocated_bytes = targets.iter().try_fold(0u64, |a, s| {
+        a.checked_add(s.allocated_attributed_bytes)
+            .ok_or("allocation overflow")
+    })?;
     Ok(Plan {
-        version: 1,
+        version: 2,
         targets,
         total_bytes,
+        total_allocated_bytes,
     })
 }
 fn save_plan(paths: &[PathBuf], output: &Path) -> Result<Value, String> {
@@ -250,12 +344,15 @@ fn save_plan(paths: &[PathBuf], output: &Path) -> Result<Value, String> {
 fn read_checked_plan(path: &Path) -> Result<(Vec<u8>, Plan), String> {
     let data = fs::read(path).map_err(err)?;
     let plan: Plan = serde_json::from_slice(&data).map_err(err)?;
-    if plan.version != 1 || plan.targets.is_empty() {
+    if plan.version != 2 || plan.targets.is_empty() {
         return Err("invalid plan version or empty plan".into());
     }
     let paths: Vec<_> = plan.targets.iter().map(|s| s.path.clone()).collect();
     let current = make_plan(&paths, path)?;
-    if current.targets != plan.targets || current.total_bytes != plan.total_bytes {
+    if current.targets != plan.targets
+        || current.total_bytes != plan.total_bytes
+        || current.total_allocated_bytes != plan.total_allocated_bytes
+    {
         return Err("plan differs from current filesystem; create a new plan".into());
     }
     Ok((data, plan))
@@ -263,20 +360,22 @@ fn read_checked_plan(path: &Path) -> Result<(Vec<u8>, Plan), String> {
 fn plan_description(data: &[u8], plan: &Plan) -> (String, String) {
     let digest = format!("{:x}", Sha256::digest(data));
     let token = format!("DELETE {}", &digest[..12]);
-    let mut message =
-        String::from("Permanent deletion; logical bytes, not guaranteed reclaimed space:\n");
+    let mut message = String::from(
+        "Permanent deletion; logical and attributed file allocation bytes, not guaranteed reclaimed space:\n",
+    );
     for s in &plan.targets {
         message.push_str(&format!(
-            "{} | {} bytes | {} files | {} directories\n",
+            "{} | {} bytes logical | {} bytes allocated | {} files | {} directories\n",
             s.path.display(),
             s.bytes,
+            s.allocated_attributed_bytes,
             s.files,
             s.directories
         ));
     }
     message.push_str(&format!(
-        "Total: {} bytes\nType {} to confirm.",
-        plan.total_bytes, token
+        "Total: {} bytes logical | {} bytes allocated\nType {} to confirm.",
+        plan.total_bytes, plan.total_allocated_bytes, token
     ));
     (message, token)
 }
@@ -307,7 +406,9 @@ fn delete_checked(path: &Path, expected_data: &[u8]) -> Result<Value, String> {
         }
         deleted.push(s.path.clone());
     }
-    Ok(json!({"deleted":deleted,"planned_logical_bytes":plan.total_bytes}))
+    Ok(
+        json!({"deleted":deleted,"planned_logical_bytes":plan.total_bytes,"planned_allocated_attributed_bytes":plan.total_allocated_bytes}),
+    )
 }
 fn apply(path: &Path) -> Result<(), String> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -347,20 +448,19 @@ fn serve() -> Result<(), String> {
             }
         };
         if req.get("method").is_none() {
-            if let Some((_, _, _, _, request_id)) = &pending {
-                if req["id"].as_str() == Some(request_id) {
-                    let (call_id, path, data, token, _) = pending.take().unwrap();
-                    let approved = req["result"]["action"] == "accept"
-                        && req["result"]["content"]["confirmation"].as_str()
-                            == Some(token.as_str());
-                    let result = if approved {
-                        delete_checked(&path, &data)
-                    } else {
-                        Err("confirmation declined or invalid; nothing deleted".into())
-                    };
-                    writeln!(stdout, "{}", tool_result(&call_id, result)).map_err(err)?;
-                    stdout.flush().map_err(err)?;
-                }
+            if let Some((_, _, _, _, request_id)) = &pending
+                && req["id"].as_str() == Some(request_id)
+            {
+                let (call_id, path, data, token, _) = pending.take().unwrap();
+                let approved = req["result"]["action"] == "accept"
+                    && req["result"]["content"]["confirmation"].as_str() == Some(token.as_str());
+                let result = if approved {
+                    delete_checked(&path, &data)
+                } else {
+                    Err("confirmation declined or invalid; nothing deleted".into())
+                };
+                writeln!(stdout, "{}", tool_result(&call_id, result)).map_err(err)?;
+                stdout.flush().map_err(err)?;
             }
             continue;
         }
@@ -440,13 +540,14 @@ fn main() {
             if json {
                 println!("{}", serde_json::to_string_pretty(&v).map_err(err)?);
             } else {
-                println!("Logical bytes | path (incomplete entries report an error)");
+                println!("Logical bytes | Allocated bytes* | path (*hard links attributed once across this scan)");
                 if let Some(entries) = v["entries"].as_array() {
                     for entry in entries {
                         let path = entry["path"].as_str().unwrap_or("?");
                         if let Some(bytes) = entry["bytes"].as_u64() {
                             println!(
-                                "{bytes:>13} | {path}{}",
+                                "{bytes:>13} | {:>16} | {path}{}",
+                                entry["allocated_attributed_bytes"].as_u64().unwrap_or(0),
                                 if entry["complete"] == false {
                                     " [incomplete]"
                                 } else {
@@ -455,8 +556,8 @@ fn main() {
                             );
                         } else {
                             println!(
-                                "{:>13} | {path}: {}",
-                                "ERROR",
+                                "{:>13} | {:>16} | {path}: {}",
+                                "ERROR", "-",
                                 entry["error"].as_str().unwrap_or("unknown")
                             );
                         }
@@ -545,6 +646,104 @@ mod tests {
         save_plan(std::slice::from_ref(&target), &plan).unwrap();
         delete_checked(&plan, &fs::read(&plan).unwrap()).unwrap();
         assert!(!target.exists());
+    }
+    #[test]
+    fn scan_counts_hard_links_once_across_children() {
+        let f = Fixture::new();
+        fs::create_dir(f.0.join("a")).unwrap();
+        fs::create_dir(f.0.join("b")).unwrap();
+        let original = f.0.join("a/original");
+        fs::write(&original, vec![42; 32768]).unwrap();
+        fs::hard_link(&original, f.0.join("b/link")).unwrap();
+        let expected = allocation::file_allocation(&original, &fs::metadata(&original).unwrap())
+            .unwrap()
+            .bytes;
+        let result = scan(&f.0).unwrap();
+        assert_eq!(result["complete"], true);
+        assert_eq!(result["total_allocated_bytes"], expected);
+        let entries = result["entries"].as_array().unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e["bytes"].as_u64().unwrap())
+                .sum::<u64>(),
+            65536
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e["allocated_attributed_bytes"].as_u64().unwrap())
+                .sum::<u64>(),
+            expected
+        );
+    }
+    #[test]
+    fn sparse_demo_reports_allocated_below_logical() {
+        let f = Fixture::new();
+        let path = f.0.join("sparse-雪.bin");
+        let file = fs::File::create(&path).unwrap();
+        #[cfg(windows)]
+        {
+            let result = std::process::Command::new("fsutil")
+                .args(["sparse", "setflag"])
+                .arg(&path)
+                .output()
+                .expect("fsutil is required for the Windows sparse-file test");
+            assert!(
+                result.status.success(),
+                "cannot set sparse flag: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        file.set_len(64 * 1024 * 1024).unwrap();
+        drop(file);
+        let result = scan(&f.0).unwrap();
+        let e = &result["entries"][0];
+        assert_eq!(e["bytes"], 64 * 1024 * 1024);
+        assert_eq!(e["complete"], true);
+        assert!(e["allocated_attributed_bytes"].as_u64().unwrap() < e["bytes"].as_u64().unwrap());
+        let plan = make_plan(std::slice::from_ref(&path), &f.0.join("plan.json")).unwrap();
+        assert_eq!(plan.total_bytes, e["bytes"]);
+        assert_eq!(plan.total_allocated_bytes, e["allocated_attributed_bytes"]);
+    }
+    #[test]
+    fn cleanup_plan_deduplicates_hardlinks_across_targets() {
+        let f = Fixture::new();
+        let original = f.0.join("a");
+        let link = f.0.join("b");
+        fs::write(&original, vec![1; 32768]).unwrap();
+        fs::hard_link(&original, &link).unwrap();
+        let one = allocation::file_allocation(&original, &fs::metadata(&original).unwrap())
+            .unwrap()
+            .bytes;
+        let plan = make_plan(&[original, link], &f.0.join("plan.json")).unwrap();
+        assert_eq!(plan.total_bytes, 65536);
+        assert_eq!(plan.total_allocated_bytes, one);
+    }
+    #[test]
+    fn scan_caps_errors_and_retains_valid_files() {
+        let f = Fixture::new();
+        let dir = f.0.join("data");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("ok"), b"123").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            for i in 0..55 {
+                symlink("missing", dir.join(format!("link-{i}"))).unwrap();
+            }
+            let result = scan(&f.0).unwrap();
+            let e = &result["entries"][0];
+            assert_eq!(e["bytes"], 3);
+            assert_eq!(e["complete"], false);
+            assert_eq!(e["error_count"], 55);
+            assert_eq!(e["errors"].as_array().unwrap().len(), MAX_SCAN_ERRORS);
+        }
+        #[cfg(windows)]
+        {
+            let result = scan(&f.0).unwrap();
+            assert_eq!(result["entries"][0]["bytes"], 3);
+        }
     }
     #[test]
     fn does_not_overwrite_plan() {

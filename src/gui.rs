@@ -111,20 +111,26 @@ impl App {
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if let Some(rx) = &self.rx {
-            if let Ok(result) = rx.try_recv() {
-                match result {
-                    Ok(v) => {
-                        self.entries = v["entries"].as_array().cloned().unwrap_or_default();
-                        self.status = format!(
-                            "{} entries. Logical sizes; errors are incomplete.",
-                            self.entries.len()
-                        );
-                    }
-                    Err(e) => self.status = e,
+        if let Some(rx) = &self.rx
+            && let Ok(result) = rx.try_recv()
+        {
+            match result {
+                Ok(v) => {
+                    self.entries = v["entries"].as_array().cloned().unwrap_or_default();
+                    self.status = format!(
+                        "{} entries. Attributed allocation: {} bytes{}",
+                        self.entries.len(),
+                        v["total_allocated_bytes"].as_u64().unwrap_or(0),
+                        if v["complete"] == false {
+                            " (incomplete)"
+                        } else {
+                            ""
+                        }
+                    );
                 }
-                self.rx = None;
+                Err(e) => self.status = e,
             }
+            self.rx = None;
         }
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.heading("filetree233");
@@ -134,11 +140,11 @@ impl eframe::App for App {
                 if ui.button("Scan").clicked() {
                     self.begin_scan(ctx);
                 }
-                if ui.button("Up").clicked() {
-                    if let Some(p) = std::path::Path::new(&self.path).parent() {
-                        self.path = p.display().to_string();
-                        self.begin_scan(ctx);
-                    }
+                if ui.button("Up").clicked()
+                    && let Some(p) = std::path::Path::new(&self.path).parent()
+                {
+                    self.path = p.display().to_string();
+                    self.begin_scan(ctx);
                 }
             });
             ui.horizontal(|ui| {
@@ -194,7 +200,7 @@ impl eframe::App for App {
             });
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.label(
-                "Largest entries (click a directory name to open; check entries to plan deletion)",
+                "Logical bytes | allocated bytes* | path (*hard links attributed once across scan)",
             );
             let total: u64 = self
                 .entries
@@ -264,7 +270,7 @@ impl eframe::App for App {
                                 Color32::LIGHT_RED,
                                 format!(
                                     "Incomplete: {}",
-                                    entry["errors"].as_array().map_or(1, |a| a.len())
+                                    entry["error_count"].as_u64().unwrap_or(1)
                                 ),
                             );
                         }
