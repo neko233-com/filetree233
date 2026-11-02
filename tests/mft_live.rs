@@ -88,6 +88,18 @@ fn live_ntfs_volume_finds_created_demo_file() {
     assert!(mark.status.success(), "cannot create sparse demo file");
     sparse_file.set_len(64 * 1024 * 1024).unwrap();
     drop(sparse_file);
+    let compressed = demo.join("compressed.bin");
+    fs::write(&compressed, vec![0u8; 128 * 1024]).unwrap();
+    let compressed_result = Command::new("compact.exe")
+        .args(["/c", "/q"])
+        .arg(&compressed)
+        .output()
+        .unwrap();
+    assert!(
+        compressed_result.status.success(),
+        "cannot create compressed demo file: {}",
+        String::from_utf8_lossy(&compressed_result.stderr)
+    );
     fs::create_dir(demo.join("outside")).unwrap();
     fs::write(demo.join("outside/keep"), b"outside").unwrap();
     let junction = Command::new("cmd")
@@ -136,6 +148,7 @@ fn live_ntfs_volume_finds_created_demo_file() {
         "empty",
         "root-file",
         "sparse.bin",
+        "compressed.bin",
         "outside",
         "junction",
     ] {

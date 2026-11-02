@@ -249,12 +249,11 @@ pub fn scan_tree(path: &Path) -> Result<serde_json::Value, String> {
                 }
             }
         }
-        let Some(path) = index.file_path(&root, &links) else {
-            continue;
-        };
-        // The raw allocation field can be virtual for sparse/compressed streams and
-        // differs from Win32 allocation for MFT-resident data. Query only those cases.
+        // Only materialize a full path when special allocation needs a Win32 query.
         let allocated = if entry.is_resident || entry.is_sparse || entry.is_compressed {
+            let Some(path) = index.file_path(&root, &links) else {
+                continue;
+            };
             match fs::symlink_metadata(&path).and_then(|m| {
                 if crate::is_reparse(&m) || !m.is_file() {
                     return Err(io::Error::other("file changed during scan"));
