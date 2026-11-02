@@ -159,105 +159,124 @@ fn summarize(
     Ok(s)
 }
 const MAX_SCAN_ERRORS: usize = 50;
-fn analyze_entry(
-    path: &Path,
-    seen_links: &std::sync::Mutex<std::collections::HashSet<allocation::FileId>>,
-) -> Value {
-    let mut stack = vec![path.to_path_buf()];
-    let (mut bytes, mut allocated, mut files, mut directories, mut error_count, mut alloc_errors) =
-        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
-    let mut errors = Vec::new();
-    let mut record_error = |text: String| {
-        error_count += 1;
-        if errors.len() < MAX_SCAN_ERRORS {
-            errors.push(text);
-        }
-    };
-    while let Some(p) = stack.pop() {
-        let m = match fs::symlink_metadata(&p) {
-            Ok(m) => m,
-            Err(e) => {
-                record_error(format!("{}: {e}", p.display()));
-                continue;
-            }
-        };
-        if m.file_type().is_symlink() || is_reparse(&m) {
-            record_error(format!("{}: link/reparse point skipped", p.display()));
-            continue;
-        }
-        if m.is_file() {
-            bytes = bytes.saturating_add(m.len());
-            files += 1;
-            match allocation::file_allocation(&p, &m) {
-                Ok(a) => {
-                    if a.shared_id
-                        .is_none_or(|id| seen_links.lock().expect("link set poisoned").insert(id))
-                    {
-                        allocated = allocated.saturating_add(a.bytes);
-                    }
-                }
-                Err(e) => {
-                    alloc_errors += 1;
-                    record_error(format!("{}: allocation: {e}", p.display()));
-                }
-            }
-        } else if m.is_dir() {
-            directories += 1;
-            match fs::read_dir(&p) {
-                Ok(iter) => {
-                    for entry in iter {
-                        match entry {
-                            Ok(entry) => {
-                                let child = entry.path();
-                                // Keep only directories on the pending stack; large flat directories need no file-sized queue.
-                                match entry.file_type() {
-                                    Ok(t) if t.is_file() => match fs::symlink_metadata(&child) {
-                                        Ok(m) if !is_reparse(&m) && m.is_file() => {
-                                            bytes = bytes.saturating_add(m.len());
-                                            files += 1;
-                                            match allocation::file_allocation(&child, &m) {
-                                                Ok(a) => {
-                                                    if a.shared_id.is_none_or(|id| {
-                                                        seen_links
-                                                            .lock()
-                                                            .expect("link set poisoned")
-                                                            .insert(id)
-                                                    }) {
-                                                        allocated =
-                                                            allocated.saturating_add(a.bytes);
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    alloc_errors += 1;
-                                                    record_error(format!(
-                                                        "{}: allocation: {e}",
-                                                        child.display()
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                        Ok(_) => record_error(format!(
-                                            "{}: link/reparse point skipped",
-                                            child.display()
-                                        )),
-                                        Err(e) => record_error(format!("{}: {e}", child.display())),
-                                    },
-                                    Ok(_) => stack.push(child),
-                                    Err(e) => record_error(format!("{}: {e}", child.display())),
-                                }
-                            }
-                            Err(e) => record_error(format!("{}: {e}", p.display())),
-                        }
-                    }
-                }
-                Err(e) => record_error(format!("{}: {e}", p.display())),
-            }
-        } else {
-            record_error(format!("{}: unsupported entry", p.display()));
+#[derive(Default)]
+struct ScanStats {
+    bytes: u64,
+    allocated: u64,
+    files: u64,
+    directories: u64,
+    error_count: u64,
+    allocation_errors: u64,
+    errors: Vec<String>,
+}
+impl ScanStats {
+    fn error(&mut self, message: String) {
+        self.error_count += 1;
+        if self.errors.len() < MAX_SCAN_ERRORS {
+            self.errors.push(message);
         }
     }
-    drop(record_error);
-    json!({"path":path,"bytes":bytes,"allocated_attributed_bytes":allocated,"allocation_errors":alloc_errors,"files":files,"directories":directories,"complete":error_count == 0,"error_count":error_count,"errors":errors})
+    fn merge(&mut self, other: Self) {
+        self.bytes = self.bytes.saturating_add(other.bytes);
+        self.allocated = self.allocated.saturating_add(other.allocated);
+        self.files = self.files.saturating_add(other.files);
+        self.directories = self.directories.saturating_add(other.directories);
+        self.error_count = self.error_count.saturating_add(other.error_count);
+        self.allocation_errors = self
+            .allocation_errors
+            .saturating_add(other.allocation_errors);
+        self.errors.extend(
+            other
+                .errors
+                .into_iter()
+                .take(MAX_SCAN_ERRORS.saturating_sub(self.errors.len())),
+        );
+    }
+    fn into_value(self, path: &Path) -> Value {
+        json!({"path":path,"bytes":self.bytes,"allocated_attributed_bytes":self.allocated,"allocation_errors":self.allocation_errors,"files":self.files,"directories":self.directories,"complete":self.error_count == 0,"error_count":self.error_count,"errors":self.errors})
+    }
+}
+fn count_file(
+    path: &Path,
+    m: &fs::Metadata,
+    stats: &mut ScanStats,
+    seen: &std::sync::Mutex<std::collections::HashSet<allocation::FileId>>,
+) {
+    stats.bytes = stats.bytes.saturating_add(m.len());
+    stats.files += 1;
+    match allocation::file_allocation(path, m) {
+        Ok(a) => {
+            if a.shared_id
+                .is_none_or(|id| seen.lock().expect("link set poisoned").insert(id))
+            {
+                stats.allocated = stats.allocated.saturating_add(a.bytes);
+            }
+        }
+        Err(e) => {
+            stats.allocation_errors += 1;
+            stats.error(format!("{}: allocation: {e}", path.display()));
+        }
+    }
+}
+fn scan_directory_job(
+    path: &Path,
+    seen: &std::sync::Mutex<std::collections::HashSet<allocation::FileId>>,
+) -> (ScanStats, Vec<PathBuf>) {
+    let mut stats = ScanStats::default();
+    let mut subdirs = Vec::new();
+    let m = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) => {
+            stats.error(format!("{}: {e}", path.display()));
+            return (stats, subdirs);
+        }
+    };
+    if m.file_type().is_symlink() || is_reparse(&m) {
+        stats.error(format!("{}: link/reparse point skipped", path.display()));
+        return (stats, subdirs);
+    }
+    if m.is_file() {
+        count_file(path, &m, &mut stats, seen);
+        return (stats, subdirs);
+    }
+    if !m.is_dir() {
+        stats.error(format!("{}: unsupported entry", path.display()));
+        return (stats, subdirs);
+    }
+    stats.directories += 1;
+    match fs::read_dir(path) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(entry) => {
+                        let child = entry.path();
+                        match entry.file_type() {
+                            Ok(t) if t.is_file() => match fs::symlink_metadata(&child) {
+                                Ok(m) if !is_reparse(&m) && m.is_file() => {
+                                    count_file(&child, &m, &mut stats, seen)
+                                }
+                                Ok(_) => stats.error(format!(
+                                    "{}: link/reparse point skipped",
+                                    child.display()
+                                )),
+                                Err(e) => stats.error(format!("{}: {e}", child.display())),
+                            },
+                            Ok(_) => subdirs.push(child),
+                            Err(e) => stats.error(format!("{}: {e}", child.display())),
+                        }
+                    }
+                    Err(e) => stats.error(format!("{}: {e}", path.display())),
+                }
+            }
+        }
+        Err(e) => stats.error(format!("{}: {e}", path.display())),
+    }
+    (stats, subdirs)
+}
+struct ScanQueue {
+    jobs: std::collections::VecDeque<(usize, PathBuf)>,
+    active: usize,
+    totals: Vec<ScanStats>,
 }
 #[cfg(test)]
 fn scan(path: &Path) -> Result<Value, String> {
@@ -280,31 +299,53 @@ fn scan_with_threads(path: &Path, threads: u8) -> Result<Value, String> {
         }
     }
     children.sort();
-    let seen_links = std::sync::Mutex::new(std::collections::HashSet::new());
-    let jobs = std::sync::atomic::AtomicUsize::new(0);
-    let output = std::sync::Mutex::new(Vec::with_capacity(children.len()));
-    let worker_count = usize::min(usize::from(threads), children.len());
+    let seen = std::sync::Mutex::new(std::collections::HashSet::new());
+    let queue = std::sync::Mutex::new(ScanQueue {
+        jobs: children.iter().cloned().enumerate().collect(),
+        active: 0,
+        totals: (0..children.len()).map(|_| ScanStats::default()).collect(),
+    });
+    let wake = std::sync::Condvar::new();
+    let worker_count = if children.is_empty() {
+        0
+    } else {
+        usize::from(threads)
+    };
     std::thread::scope(|scope| {
         for _ in 0..worker_count {
             scope.spawn(|| {
                 loop {
-                    let i = jobs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if let Some(child) = children.get(i) {
-                        let value = analyze_entry(child, &seen_links);
-                        output
-                            .lock()
-                            .expect("scan output poisoned")
-                            .push((i, value));
-                    } else {
-                        break;
-                    }
+                    let (index, path) = {
+                        let mut q = queue.lock().expect("scan queue poisoned");
+                        loop {
+                            if let Some(job) = q.jobs.pop_front() {
+                                q.active += 1;
+                                break job;
+                            }
+                            if q.active == 0 {
+                                return;
+                            }
+                            q = wake.wait(q).expect("scan queue poisoned");
+                        }
+                    };
+                    let (stats, subdirs) = scan_directory_job(&path, &seen);
+                    let mut q = queue.lock().expect("scan queue poisoned");
+                    q.totals[index].merge(stats);
+                    q.jobs.extend(subdirs.into_iter().map(|path| (index, path)));
+                    q.active -= 1;
+                    wake.notify_all();
                 }
             });
         }
     });
-    let mut results = output.into_inner().map_err(err)?;
-    results.sort_unstable_by_key(|(index, _)| *index);
-    entries.extend(results.into_iter().map(|(_, value)| value));
+    let result = queue.into_inner().map_err(err)?;
+    entries.extend(
+        result
+            .totals
+            .into_iter()
+            .zip(&children)
+            .map(|(stats, path)| stats.into_value(path)),
+    );
     entries.sort_by(|a, b| {
         b["bytes"]
             .as_u64()
@@ -744,6 +785,30 @@ mod tests {
         }
         assert!(scan_with_threads(&f.0, 0).is_err());
         assert!(scan_with_threads(&f.0, 33).is_err());
+    }
+    #[test]
+    fn nested_parallel_jobs_contribute_to_one_top_level_entry() {
+        let f = Fixture::new();
+        let parent = f.0.join("single-root");
+        for n in 0..8 {
+            let dir = parent.join(format!("branch-{n}/nested"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("file"), vec![n as u8; n + 1]).unwrap();
+        }
+        let serial = scan_with_threads(&f.0, 1).unwrap();
+        let parallel = scan_with_threads(&f.0, 4).unwrap();
+        assert_eq!(parallel["threads"], 4);
+        assert_eq!(parallel["entries"][0]["bytes"], 36);
+        assert_eq!(parallel["entries"][0]["files"], 8);
+        assert_eq!(parallel["entries"][0]["directories"], 17);
+        assert_eq!(
+            parallel["entries"][0]["bytes"],
+            serial["entries"][0]["bytes"]
+        );
+        assert_eq!(
+            parallel["total_allocated_bytes"],
+            serial["total_allocated_bytes"]
+        );
     }
     #[test]
     fn sparse_demo_reports_allocated_below_logical() {
