@@ -18,30 +18,51 @@ fn live_ntfs_volume_finds_created_demo_file() {
     let file = root.join(&name);
     fs::write(&file, vec![42; 32768]).unwrap();
     let volume_root = file.ancestors().last().unwrap();
-    let result = Command::new(env!("CARGO_BIN_EXE_filetree233"))
-        .arg("mft-volume")
-        .arg(volume_root)
-        .arg("--name")
-        .arg(&name)
-        .output()
-        .unwrap();
+    for fast in [false, true] {
+        let start = std::time::Instant::now();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_filetree233"));
+        command
+            .arg("mft-volume")
+            .arg(volume_root)
+            .arg("--name")
+            .arg(&name);
+        if fast {
+            command.arg("--fast");
+        }
+        let result = command.output().unwrap();
+        eprintln!(
+            "live NTFS scan mode={} elapsed_ms={}",
+            if fast { "fast" } else { "detailed" },
+            start.elapsed().as_millis()
+        );
+        assert!(
+            result.status.success(),
+            "live MFT inspection failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let rows: Vec<Value> = result
+            .stdout
+            .split(|b| *b == b'\n')
+            .filter(|x| !x.is_empty())
+            .map(|x| serde_json::from_slice(x).unwrap())
+            .collect();
+        let entry = rows
+            .iter()
+            .find(|row| row["type"] == "record" && row["name"] == name)
+            .expect("created demo file absent from MFT");
+        assert_eq!(entry["logical_bytes"], 32768);
+        assert_eq!(
+            rows.last().unwrap()["source"],
+            if fast {
+                "live_ntfs_volume_fast"
+            } else {
+                "live_ntfs_volume"
+            }
+        );
+        assert_eq!(rows.last().unwrap()["complete"], false);
+        if fast {
+            assert!(rows.last().unwrap()["invalid_records"].is_null());
+        }
+    }
     fs::remove_file(&file).unwrap();
-    assert!(
-        result.status.success(),
-        "live MFT inspection failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let rows: Vec<Value> = result
-        .stdout
-        .split(|b| *b == b'\n')
-        .filter(|x| !x.is_empty())
-        .map(|x| serde_json::from_slice(x).unwrap())
-        .collect();
-    let entry = rows
-        .iter()
-        .find(|row| row["type"] == "record" && row["name"] == name)
-        .expect("created demo file absent from MFT");
-    assert_eq!(entry["logical_bytes"], 32768);
-    assert_eq!(rows.last().unwrap()["source"], "live_ntfs_volume");
-    assert_eq!(rows.last().unwrap()["complete"], false);
 }

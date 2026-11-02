@@ -47,6 +47,9 @@ enum Command {
         /// Show only records whose name contains this text; errors are counted in the summary.
         #[arg(long)]
         name: Option<String>,
+        /// Use a best-effort batched reader; skipped malformed records are not counted.
+        #[arg(long)]
+        fast: bool,
     },
     /// Create a cleanup plan for explicitly selected files and directories.
     Plan {
@@ -663,7 +666,7 @@ fn main() {
             Ok(())
         }),
         Command::MftInspect { path, record_size, used_only } => mft::inspect_stdout(&path, record_size, used_only),
-        Command::MftVolume { mount, name } => mft::inspect_volume_stdout(&mount, name.as_deref()),
+        Command::MftVolume { mount, name, fast } => mft::inspect_volume_stdout(&mount, name.as_deref(), fast),
         Command::Plan { paths, output } => save_plan(&paths, &output)
             .map(|v| println!("{}", serde_json::to_string_pretty(&v).unwrap())),
         Command::Apply { plan } => apply(&plan),

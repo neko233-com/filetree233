@@ -28,9 +28,31 @@ pub fn inspect(
 }
 
 /// Read directly from an NTFS volume. This is observational and does not authorize cleanup.
-pub fn inspect_volume(path: &Path, name: Option<&str>, out: &mut impl Write) -> Result<(), String> {
+pub fn inspect_volume(
+    path: &Path,
+    name: Option<&str>,
+    fast: bool,
+    out: &mut impl Write,
+) -> Result<(), String> {
     let volume = ntfs_mft::Volume::from_mount_point(path).map_err(|e| e.to_string())?;
     let raw = volume.raw_mft().map_err(|e| e.to_string())?;
+    if fast {
+        let mut parsed = 0u64;
+        let mut displayed = 0u64;
+        for result in raw.scan_entries().map_err(|e| e.to_string())? {
+            let entry = result.map_err(|e| e.to_string())?;
+            parsed += 1;
+            if name.is_some_and(|needle| !entry.file_name.to_string_lossy().contains(needle)) {
+                continue;
+            }
+            let metadata = format!("{:?}", entry.metadata());
+            let value = entry_value(&entry, &metadata, None, None);
+            writeln!(out, "{value}").map_err(|e| e.to_string())?;
+            displayed += 1;
+        }
+        writeln!(out, "{}", json!({"type":"summary","parsed_records":parsed,"invalid_records":null,"displayed_records":displayed,"source":"live_ntfs_volume_fast","complete":false,"note":"Fast MFT scan may silently skip malformed records or incomplete attributes; counts and metadata are best effort"})).map_err(|e| e.to_string())?;
+        return out.flush().map_err(|e| e.to_string());
+    }
     let options = MftStreamOptions::new(raw.file_record_size())
         .map_err(|e| e.to_string())?
         .resolve_extensions(true);
@@ -72,9 +94,12 @@ fn inspect_stream<R: Read + Seek>(
                 if name.is_some_and(|needle| !entry.file_name.to_string_lossy().contains(needle)) {
                     continue;
                 }
-                let links: Vec<_> = entry.links.iter().map(|link| json!({"parent_reference":link.parent_reference.get(),"namespace":format!("{:?}",link.namespace),"name":link.file_name.to_string_lossy(),"name_utf16":link.file_name.as_utf16()})).collect();
-                let ads: Vec<_> = entry.alternate_data_streams.iter().map(|stream| json!({"name":stream.name.to_string_lossy(),"name_utf16":stream.name.as_utf16(),"logical_bytes":stream.real_size,"allocated_bytes":stream.allocated_size,"resident":stream.is_resident})).collect();
-                let value = json!({"type":"record","record_number":entry.record_number,"file_reference":entry.file_reference.get(),"parent_reference":entry.parent_reference.get(),"base_reference":entry.base_reference().map(|v| v.get()),"name":entry.file_name.to_string_lossy(),"name_utf16":entry.file_name.as_utf16(),"in_use":entry.is_used,"directory":entry.is_directory,"reparse":entry.is_reparse_point,"hard_links":entry.hard_link_count,"logical_bytes":entry.real_size,"allocated_bytes":entry.allocated_size,"links":links,"alternate_streams":ads,"metadata":format!("{:?}",record.metadata),"diagnostics":format!("{:?}",record.diagnostics),"external_payload_count":record.external_payloads.len()});
+                let value = entry_value(
+                    &entry,
+                    &format!("{:?}", record.metadata),
+                    Some(&format!("{:?}", record.diagnostics)),
+                    Some(record.external_payloads.len()),
+                );
                 writeln!(out, "{value}").map_err(|e| e.to_string())?;
                 displayed += 1;
             }
@@ -98,8 +123,18 @@ fn inspect_stream<R: Read + Seek>(
     writeln!(out, "{}", json!({"type":"summary","parsed_records":parsed,"invalid_records":invalid,"displayed_records":displayed,"source":source,"complete":false,"note":"MFT-only data cannot prove complete metadata or live filesystem state"})).map_err(|e| e.to_string())?;
     out.flush().map_err(|e| e.to_string())
 }
-pub fn inspect_volume_stdout(path: &Path, name: Option<&str>) -> Result<(), String> {
-    inspect_volume(path, name, &mut io::stdout().lock())
+fn entry_value(
+    entry: &ntfs_mft::RawMftEntry,
+    metadata: &str,
+    diagnostics: Option<&str>,
+    external_payload_count: Option<usize>,
+) -> serde_json::Value {
+    let links: Vec<_> = entry.links.iter().map(|link| json!({"parent_reference":link.parent_reference.get(),"namespace":format!("{:?}",link.namespace),"name":link.file_name.to_string_lossy(),"name_utf16":link.file_name.as_utf16()})).collect();
+    let ads: Vec<_> = entry.alternate_data_streams.iter().map(|stream| json!({"name":stream.name.to_string_lossy(),"name_utf16":stream.name.as_utf16(),"logical_bytes":stream.real_size,"allocated_bytes":stream.allocated_size,"resident":stream.is_resident})).collect();
+    json!({"type":"record","record_number":entry.record_number,"file_reference":entry.file_reference.get(),"parent_reference":entry.parent_reference.get(),"base_reference":entry.base_reference().map(|v| v.get()),"name":entry.file_name.to_string_lossy(),"name_utf16":entry.file_name.as_utf16(),"in_use":entry.is_used,"directory":entry.is_directory,"reparse":entry.is_reparse_point,"hard_links":entry.hard_link_count,"logical_bytes":entry.real_size,"allocated_bytes":entry.allocated_size,"links":links,"alternate_streams":ads,"metadata":metadata,"diagnostics":diagnostics,"external_payload_count":external_payload_count})
+}
+pub fn inspect_volume_stdout(path: &Path, name: Option<&str>, fast: bool) -> Result<(), String> {
+    inspect_volume(path, name, fast, &mut io::stdout().lock())
 }
 pub fn inspect_stdout(path: &Path, record_size: usize, used_only: bool) -> Result<(), String> {
     inspect(path, record_size, used_only, &mut io::stdout().lock())
