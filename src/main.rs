@@ -10,6 +10,7 @@ mod recommend;
 mod recycle;
 mod tree;
 mod treemap;
+mod volumes;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -36,6 +37,10 @@ enum ScanEngine {
 enum Command {
     /// Open the graphical disk analyzer.
     Gui,
+    /// List mounted volumes and available capacity.
+    Volumes,
+    /// Query filesystem capacity for an explicit path, including mounts not in the automatic list.
+    Capacity { path: PathBuf },
     /// Analyze immediate children of a directory.
     Scan {
         path: PathBuf,
@@ -722,6 +727,8 @@ fn serve() -> Result<(), String> {
             }
             "ping" => json!({"jsonrpc":"2.0","id":id,"result":{}}),
             "tools/list" => json!({"jsonrpc":"2.0","id":id,"result":{"tools":[
+                {"name":"volumes","description":"List detected mounted volumes and available capacity.","inputSchema":{"type":"object","properties":{}}},
+                {"name":"capacity","description":"Query filesystem capacity at an explicit path.","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},
                 {"name":"scan","description":"Analyze immediate children with optional parallel workers, reporting logical bytes, attributed allocation and errors.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path"]}},
                 {"name":"benchmark","description":"Measure full-tree scan time and peak memory in separate local processes; no deletion.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32},"iterations":{"type":"integer","minimum":1,"maximum":10},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path"]}},
                 {"name":"recommend","description":"Suggest cache and build directories with reasons and risks; never selects or deletes.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path"]}},
@@ -757,6 +764,8 @@ fn serve() -> Result<(), String> {
                     }
                 } else {
                     let result = match name {
+                        "volumes" => volumes::list_json(),
+                        "capacity" => (|| { let path=args["path"].as_str().ok_or("path required")?; volumes::capacity(Path::new(path)) })(),
                         "scan" => (|| { let path = args["path"].as_str().ok_or("path required")?; let threads = if args.get("threads").is_some() { u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")? } else { 4 }; let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; scan_dispatch(Path::new(path), threads, engine) })(),
                         "benchmark" => (|| { let path=args["path"].as_str().ok_or("path required")?; let n=|key: &str, default: u8| -> Result<u8, &str> { match args.get(key) { None => Ok(default), Some(v) => u8::try_from(v.as_u64().ok_or("invalid numeric argument")?).map_err(|_| "invalid numeric argument") } }; let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; benchmark::run(Path::new(path), n("threads",4)?, engine, n("iterations",3)?) })(),
                         "recommend" => (|| { let path=args["path"].as_str().ok_or("path required")?; let threads=if args.get("threads").is_some() {u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")?} else {4}; let engine=match args.get("engine") {None=>ScanEngine::Walk,Some(Value::String(name)) if name=="walk"=>ScanEngine::Walk,Some(Value::String(name)) if name=="mft"=>ScanEngine::Mft,Some(Value::String(name)) if name=="auto"=>ScanEngine::Auto,_=>return Err("invalid engine".into())}; let (stop,progress)=tree::new_controls(); scan_full_tree(Path::new(path),threads,engine,&stop,&progress).map(|tree|recommend::analyze(&tree).json()) })(),
@@ -780,6 +789,8 @@ fn serve() -> Result<(), String> {
 }
 fn main() {
     let result = match Cli::parse().command.unwrap_or(Command::Gui) {
+        Command::Volumes => volumes::list_json().and_then(|value| { println!("{}",serde_json::to_string_pretty(&value).map_err(err)?); Ok(()) }),
+        Command::Capacity { path } => volumes::capacity(&path).and_then(|value| { println!("{}",serde_json::to_string_pretty(&value).map_err(err)?); Ok(()) }),
         Command::Scan { path, json, threads, engine } => scan_dispatch(&path, threads, engine).and_then(|v| {
             if json {
                 println!("{}", serde_json::to_string_pretty(&v).map_err(err)?);

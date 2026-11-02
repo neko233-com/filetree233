@@ -62,6 +62,20 @@ fn install_system_font(ctx: &egui::Context) {
         }
     }
 }
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
 enum ScanResult {
     Summary(serde_json::Value),
     Tree(crate::tree::Snapshot),
@@ -69,6 +83,14 @@ enum ScanResult {
 struct App {
     path: String,
     filter: String,
+    volumes: Vec<crate::volumes::Volume>,
+    volume_rx: Option<Receiver<Result<Vec<crate::volumes::Volume>, String>>>,
+    volumes_requested: bool,
+    volume_status: String,
+    #[cfg(test)]
+    volume_combo_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    volume_item_rects: Vec<(PathBuf, egui::Rect)>,
     threads: u8,
     engine: ScanEngine,
     full_tree: bool,
@@ -115,6 +137,14 @@ impl Default for App {
                 .display()
                 .to_string(),
             filter: String::new(),
+            volumes: Vec::new(),
+            volume_rx: None,
+            volumes_requested: false,
+            volume_status: String::new(),
+            #[cfg(test)]
+            volume_combo_rect: None,
+            #[cfg(test)]
+            volume_item_rects: Vec::new(),
             threads: 4,
             engine: ScanEngine::Walk,
             full_tree: true,
@@ -159,6 +189,86 @@ impl Default for App {
     }
 }
 impl App {
+    fn volume_picker(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        #[cfg(test)]
+        self.volume_item_rects.clear();
+        ui.horizontal(|ui| {
+            let combo = egui::ComboBox::from_id_salt("volumes")
+                .selected_text("Choose volume")
+                .width(240.0)
+                .show_ui(ui, |ui| {
+                    if self.volumes.is_empty() {
+                        ui.label("No volumes loaded");
+                    }
+                    for volume in &self.volumes {
+                        let label = format!(
+                            "{} {} {}{}{} available {} / {}",
+                            volume.mount.display(),
+                            volume.name,
+                            volume.filesystem,
+                            if volume.removable { " removable" } else { "" },
+                            if volume.read_only { " read-only" } else { "" },
+                            if volume.total == 0 {
+                                "unknown".into()
+                            } else {
+                                format_bytes(volume.available)
+                            },
+                            if volume.total == 0 {
+                                "unknown".into()
+                            } else {
+                                format_bytes(volume.total)
+                            }
+                        );
+                        let Some(path) = volume.mount.to_str() else {
+                            ui.add_enabled(false, egui::Button::new(label));
+                            continue;
+                        };
+                        let response = ui.selectable_label(false, label);
+                        #[cfg(test)]
+                        self.volume_item_rects
+                            .push((volume.mount.clone(), response.rect));
+                        if response.clicked() {
+                            self.path = path.to_owned();
+                            ui.close();
+                        }
+                    }
+                });
+            #[cfg(test)]
+            {
+                self.volume_combo_rect = Some(combo.response.rect);
+            }
+            #[cfg(not(test))]
+            let _ = combo;
+            if ui
+                .add_enabled(
+                    self.volume_rx.is_none(),
+                    egui::Button::new("Refresh volumes"),
+                )
+                .clicked()
+            {
+                self.begin_volumes(ctx);
+            }
+            if !self.volume_status.is_empty() {
+                ui.label(&self.volume_status);
+            }
+        });
+    }
+    fn begin_volumes(&mut self, ctx: &egui::Context) {
+        if self.volume_rx.is_some() {
+            return;
+        }
+        self.volumes_requested = true;
+        self.volume_status = "Loading volumes...".into();
+        let (tx, rx) = mpsc::channel();
+        self.volume_rx = Some(rx);
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let result = std::panic::catch_unwind(crate::volumes::list)
+                .unwrap_or_else(|_| Err("volume discovery failed unexpectedly".into()));
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
     fn begin_scan(&mut self, ctx: &egui::Context) {
         if self.rx.is_some() {
             return;
@@ -212,6 +322,28 @@ impl App {
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.volumes_requested {
+            self.begin_volumes(ctx);
+        }
+        if let Some(rx) = &self.volume_rx
+            && let Ok(result) = rx.try_recv()
+        {
+            match result {
+                Ok(volumes) => {
+                    self.volume_status = if volumes.is_empty() {
+                        "No volumes detected".into()
+                    } else {
+                        String::new()
+                    };
+                    self.volumes = volumes;
+                }
+                Err(error) => self.volume_status = format!("Volume discovery: {error}"),
+            }
+            self.volume_rx = None;
+        }
+        if self.volume_rx.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
         if let Some(rx) = &self.rx
             && let Ok(result) = rx.try_recv()
         {
@@ -302,6 +434,7 @@ impl eframe::App for App {
         }
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.heading("filetree233");
+            self.volume_picker(ui, ctx);
             ui.horizontal(|ui| {
                 ui.label("Directory");
                 ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(600.0));
@@ -926,5 +1059,90 @@ mod tests {
         assert!(app.plan_data.is_none());
         assert!(root.join("target/output").exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn volume_picker_sets_scan_path_only_after_click() {
+        let root = std::env::temp_dir();
+        let volume = crate::volumes::Volume {
+            mount: root.clone(),
+            name: "demo".into(),
+            filesystem: "test".into(),
+            total: 1000,
+            available: 200,
+            removable: false,
+            read_only: false,
+        };
+        let mut app = App {
+            path: "original".into(),
+            volumes: vec![volume],
+            volumes_requested: true,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let size = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1100.0, 720.0),
+        ));
+        let render = |ctx: &egui::Context, app: &mut App| {
+            egui::CentralPanel::default().show(ctx, |ui| app.volume_picker(ui, ctx));
+        };
+        for _ in 0..2 {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: size,
+                    ..Default::default()
+                },
+                |ctx| render(ctx, &mut app),
+            );
+        }
+        assert_eq!(app.path, "original");
+        let button = app.volume_combo_rect.unwrap().center();
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: size,
+                    events: vec![
+                        egui::Event::PointerMoved(button),
+                        egui::Event::PointerButton {
+                            pos: button,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ctx| render(ctx, &mut app),
+            );
+        }
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: size,
+                ..Default::default()
+            },
+            |ctx| render(ctx, &mut app),
+        );
+        assert_eq!(app.volume_item_rects.len(), 1);
+        let choice = app.volume_item_rects[0].1.center();
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: size,
+                    events: vec![
+                        egui::Event::PointerMoved(choice),
+                        egui::Event::PointerButton {
+                            pos: choice,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ctx| render(ctx, &mut app),
+            );
+        }
+        assert_eq!(app.path, root.to_str().unwrap());
+        assert!(app.rx.is_none());
     }
 }

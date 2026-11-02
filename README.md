@@ -4,7 +4,8 @@
 
 ## 已实现
 
-- 原生桌面窗口：普通遍历支持并行构建完整目录快照、展开树、导航和分层 treemap；显示逻辑大小及文件分配量，查找内容相同的文件、查看有风险说明的清理建议，选择文件或目录并生成清理计划。Windows NTFS MFT 实验引擎也可生成完整树，结果标记为不完整。
+- 磁盘总览：列出已发现的卷及总容量、可用空间，也可查询任意指定路径的文件系统容量。
+- 原生桌面窗口：支持选择已发现的卷；普通遍历支持并行构建完整目录快照、展开树、导航和分层 treemap；显示逻辑大小及文件分配量，查找内容相同的文件、查看有风险说明的清理建议，选择文件或目录并生成清理计划。Windows NTFS MFT 实验引擎也可生成完整树，结果标记为不完整。
 - CLI：`scan`、`tree`、`duplicates`、`recommend`、`plan`、`apply`；MCP stdio 也提供这些操作。
 - 清理必须先生成计划；执行前展示目录、大小和数量，人工输入确认码后再次检查计划与目录，再按计划移入回收站或永久删除；默认回收站；计划展示逻辑大小和去重后的文件分配量。MCP 客户端不支持 elicitation 时拒绝执行。
 - 扫描跳过符号链接及 Windows reparse point，保留其他可见文件大小并标记不完整；创建计划时遇到不可读取项或链接则拒绝。
@@ -16,6 +17,8 @@
 ```sh
 cargo build --release --locked
 filetree233 gui                 # 不带参数也打开 GUI
+filetree233 volumes             # 已发现的卷
+filetree233 capacity /path      # 指定路径的文件系统容量
 filetree233 scan /path/to/dir
 filetree233 scan /path/to/dir --json --threads 4
 filetree233 tree /path/to/dir --threads 4 > tree.jsonl
@@ -64,11 +67,12 @@ Windows 默认安装至 `%LOCALAPPDATA%\Programs\filetree233`；Linux/macOS 默�
 {"mcpServers":{"filetree233":{"command":"C:\\path\\to\\filetree233.exe","args":["serve"]}}}
 ```
 
-`tree(path, output, threads?, engine?)` 将完整树写入扫描目录之外的新 JSONL 文件，禁止覆盖。`recommend(path, threads?, engine?)` 输出需要人工审核的缓存/构建目录建议、大小与风险，不自动选择或删除；`benchmark(path, threads?, iterations?, engine?)` 测量独立扫描进程的时间和峰值内存；`duplicates(path, threads?)` 返回重复文件及硬链接别名，不执行删除；`scan(path, threads?, engine?)` 返回子项大小、数量及扫描错误；`engine` 可选 `walk`、`mft`、`auto`，默认 `walk`；`plan(paths, output, mode?)` 生成计划而不删除，`mode` 为 `recycle`（默认）或 `permanent`；`apply(plan)` 通过 MCP 客户端展示计划并要求用户输入确认码，确认后重新校验再执行。客户端和本地系统必须可信：恶意客户端可以伪造 elicitation 答复。
+`volumes()` 返回已发现的卷，`capacity(path)` 查询指定路径的文件系统容量；`tree(path, output, threads?, engine?)` 将完整树写入扫描目录之外的新 JSONL 文件，禁止覆盖。`recommend(path, threads?, engine?)` 输出需要人工审核的缓存/构建目录建议、大小与风险，不自动选择或删除；`benchmark(path, threads?, iterations?, engine?)` 测量独立扫描进程的时间和峰值内存；`duplicates(path, threads?)` 返回重复文件及硬链接别名，不执行删除；`scan(path, threads?, engine?)` 返回子项大小、数量及扫描错误；`engine` 可选 `walk`、`mft`、`auto`，默认 `walk`；`plan(paths, output, mode?)` 生成计划而不删除，`mode` 为 `recycle`（默认）或 `permanent`；`apply(plan)` 通过 MCP 客户端展示计划并要求用户输入确认码，确认后重新校验再执行。客户端和本地系统必须可信：恶意客户端可以伪造 elicitation 答复。
 
 ## 限制与安全边界
 
-- **逻辑大小与文件分配量不等于可回收空间。** 扫描和计划按文件标识对硬链接去重，重复硬链接的分配量归属于扫描中首先发现的路径（并行扫描时归属可能改变，总量不变）；仅统计文件数据分配量，不含目录、NTFS 额外数据流、文件系统元数据等，也不保证删除后会释放同等空间。压缩、稀疏、网络或特殊文件系统的结果依赖操作系统提供的值。错误会使扫描标记为不完整，生成清理计划时无法读取分配量则拒绝。实验性的 Windows NTFS MFT 目录汇总采用两次全卷遍历，可能遗漏损坏记录、扩展属性或无法解码的名称，结果始终标记不完整；`auto` 对非卷根目录直接使用普通遍历，卷根目录在无法访问 MFT 时回退普通遍历。当前没有卷总量统计，不应与 WizTree 的速度或准确性等同。
+- **逻辑大小与文件分配量不等于可回收空间。** 扫描和计划按文件标识对硬链接去重，重复硬链接的分配量归属于扫描中首先发现的路径（并行扫描时归属可能改变，总量不变）；仅统计文件数据分配量，不含目录、NTFS 额外数据流、文件系统元数据等，也不保证删除后会释放同等空间。压缩、稀疏、网络或特殊文件系统的结果依赖操作系统提供的值。错误会使扫描标记为不完整，生成清理计划时无法读取分配量则拒绝。实验性的 Windows NTFS MFT 目录汇总采用两次全卷遍历，可能遗漏损坏记录、扩展属性或无法解码的名称，结果始终标记不完整；`auto` 对非卷根目录直接使用普通遍历，卷根目录在无法访问 MFT 时回退普通遍历。卷容量通过系统接口单独查询，与扫描发现的文件分配量不是同一指标；不应与 WizTree 的速度或准确性等同。
+- 卷列表是查询时的系统快照。Linux 自动列表不包含网络和 tmpfs 挂载，可通过 `capacity PATH` 显式查询；网络文件系统查询可能受网络状态影响。Windows 的总量和可用量可能受用户配额影响。
 - 文件系统遍历可设置 1～32 个工作线程（默认 4），按目录并行，单个目录中的子目录也会分配给其他工作线程；机械硬盘或网络盘上增加线程可能变慢。完整树模式将节点保存在内存中，内存随文件数量增长；treemap 最多绘制 2048 个区域，多余项目会汇总为 Other。完整树支持进度和取消；MFT 完整树模式显示已读取的记录数并支持取消；MFT 一级汇总模式尚不支持实时进度或取消。清理建议使用目录名和项目标记进行启发式匹配，可能遗漏或误报；最多返回 10,000 条，并抑制已建议目录内的嵌套建议。
 - 重复文件查找按大小、分段哈希、完整 SHA-256 和逐字节比较筛选，硬链接作为同一文件的别名；读取失败或扫描不完整会标记结果不完整。搜索结果不会自动选择或删除文件。文件在检查后仍可能发生变化，共享存储或稀疏文件的实际可回收空间也可能不同。
 - 清理建议是待检查的线索，不代表目录可安全删除。建议包括 Rust `target`、Node `node_modules` / `.next`、Python 缓存、Gradle 缓存以及 Unity 项目的 `Library` / `Temp`；清理可能触发重新下载、重新构建或丢失自定义文件。大小是扫描快照，不等于可回收空间；生成计划时会重新统计并检查。
