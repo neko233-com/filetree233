@@ -75,7 +75,12 @@ struct App {
     treemap_tiles: Vec<crate::treemap::Tile>,
     treemap_current: u32,
     treemap_rect: egui::Rect,
-    tree: Option<crate::tree::Snapshot>,
+    tree: Option<Arc<crate::tree::Snapshot>>,
+    duplicates: Option<crate::duplicates::Report>,
+    duplicate_rx: Option<Receiver<Result<crate::duplicates::Report, String>>>,
+    duplicate_cancelled: Arc<AtomicBool>,
+    duplicate_progress: Arc<AtomicU64>,
+    duplicate_window_open: bool,
     tree_current: u32,
     expanded: HashSet<u32>,
     visible_rows: Vec<(u32, usize)>,
@@ -111,6 +116,11 @@ impl Default for App {
             treemap_current: u32::MAX,
             treemap_rect: egui::Rect::NOTHING,
             tree: None,
+            duplicates: None,
+            duplicate_rx: None,
+            duplicate_cancelled: Arc::new(AtomicBool::new(false)),
+            duplicate_progress: Arc::new(AtomicU64::new(0)),
+            duplicate_window_open: false,
             tree_current: 0,
             expanded: HashSet::new(),
             visible_rows: Vec::new(),
@@ -155,6 +165,10 @@ impl App {
         self.status = "Scanning...".into();
         self.entries.clear();
         self.tree = None;
+        self.duplicate_cancelled.store(true, Ordering::Relaxed);
+        self.duplicate_rx = None;
+        self.duplicates = None;
+        self.duplicate_window_open = false;
         self.tree_current = 0;
         self.expanded.clear();
         self.expanded.insert(0);
@@ -198,7 +212,7 @@ impl eframe::App for App {
                             " (incomplete)"
                         }
                     );
-                    self.tree = Some(tree);
+                    self.tree = Some(Arc::new(tree));
                 }
                 Ok(ScanResult::Summary(v)) => {
                     self.entries = v["entries"].as_array().cloned().unwrap_or_default();
@@ -220,6 +234,26 @@ impl eframe::App for App {
                 Err(e) => self.status = e,
             }
             self.rx = None;
+        }
+        if let Some(rx) = &self.duplicate_rx
+            && let Ok(result) = rx.try_recv()
+        {
+            match result {
+                Ok(report) => {
+                    self.status = format!(
+                        "Duplicate search: {} groups{}",
+                        report.groups.len(),
+                        if report.complete { "" } else { " (incomplete)" }
+                    );
+                    self.duplicates = Some(report);
+                    self.duplicate_window_open = true;
+                }
+                Err(e) => self.status = e,
+            }
+            self.duplicate_rx = None;
+        }
+        if self.duplicate_rx.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.heading("filetree233");
@@ -322,6 +356,7 @@ impl eframe::App for App {
             });
         if self.tree.is_some() {
             self.show_tree(ctx);
+            self.show_duplicates(ctx);
             return;
         }
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -425,6 +460,24 @@ impl App {
             .default_width(280.0)
             .show(ctx, |ui| {
                 ui.heading("Directory tree");
+                ui.horizontal(|ui| {
+                    if self.duplicate_rx.is_none() {
+                        if ui.button("Find duplicates").clicked() {
+                            self.begin_duplicates(Arc::clone(&tree), ctx);
+                        }
+                        if self.duplicates.is_some() && ui.button("Show duplicates").clicked() {
+                            self.duplicate_window_open = true;
+                        }
+                    } else {
+                        ui.label(format!(
+                            "Hashing: {}",
+                            self.duplicate_progress.load(Ordering::Relaxed)
+                        ));
+                        if ui.button("Cancel search").clicked() {
+                            self.duplicate_cancelled.store(true, Ordering::Relaxed);
+                        }
+                    }
+                });
                 if self.visible_dirty {
                     self.visible_rows.clear();
                     let mut pending = vec![(0u32, 0usize)];
@@ -548,6 +601,61 @@ impl App {
     }
 }
 
+impl App {
+    fn begin_duplicates(&mut self, tree: Arc<crate::tree::Snapshot>, ctx: &egui::Context) {
+        if self.duplicate_rx.is_some() {
+            return;
+        }
+        let (cancelled, progress) = crate::tree::new_controls();
+        self.duplicate_cancelled = cancelled.clone();
+        self.duplicate_progress = progress.clone();
+        self.duplicates = None;
+        let (tx, rx) = mpsc::channel();
+        self.duplicate_rx = Some(rx);
+        let ctx = ctx.clone();
+        let threads = self.threads;
+        thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::duplicates::find(&tree, threads, &cancelled, &progress)
+            }))
+            .unwrap_or_else(|_| Err("duplicate search failed unexpectedly".into()));
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
+    fn show_duplicates(&mut self, ctx: &egui::Context) {
+        if !self.duplicate_window_open {
+            return;
+        }
+        let Some(report) = self.duplicates.take() else {
+            return;
+        };
+        let mut open = self.duplicate_window_open;
+        egui::Window::new("Content-verified duplicates").open(&mut open).resizable(true).default_size([700.0,500.0]).show(ctx,|ui| {
+            ui.label("Select files explicitly, then create a cleanup plan. Hard links are aliases of the same file; actual reclaimed space may differ.");
+            if !report.complete { ui.colored_label(Color32::LIGHT_RED,format!("Incomplete: {} read errors or incomplete tree",report.error_count)); }
+            egui::ScrollArea::vertical().show(ui,|ui| {
+                for group in &report.groups {
+                    ui.separator();ui.strong(format!("{} bytes — {} independent files — SHA-256 {}",group.size,group.objects.len(),group.sha256));
+                    for object in &group.objects {
+                        for (path,alias) in std::iter::once((&object.path,false)).chain(object.aliases.iter().map(|p|(p,true))) {
+                            ui.horizontal(|ui| {
+                                let mut selected=self.selected.contains(path);
+                                if ui.checkbox(&mut selected,"").changed() { if selected {self.selected.push(path.clone());} else {self.selected.retain(|p|p!=path);}self.plan_data=None; }
+                                ui.label(path.to_string_lossy());if alias {ui.label("(hard-link alias)");}
+                            });
+                        }
+                    }
+                }
+                if report.groups.is_empty() {ui.label("No content-verified duplicate files found.");}
+                for error in &report.errors {ui.colored_label(Color32::LIGHT_RED,error);}
+            });
+        });
+        self.duplicate_window_open = open;
+        self.duplicates = Some(report);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,7 +674,7 @@ mod tests {
         let (stop, progress) = crate::tree::new_controls();
         let tree = crate::tree::scan(&root, 2, &stop, &progress).unwrap();
         let mut app = App {
-            tree: Some(tree),
+            tree: Some(Arc::new(tree)),
             ..Default::default()
         };
         app.expanded.insert(0);

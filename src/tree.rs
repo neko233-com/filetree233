@@ -279,7 +279,7 @@ pub fn new_controls() -> (Arc<AtomicBool>, Arc<AtomicU64>) {
     )
 }
 
-fn raw_units(name: &std::ffi::OsStr) -> Vec<u32> {
+pub fn raw_units(name: &std::ffi::OsStr) -> Vec<u32> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;

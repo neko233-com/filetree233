@@ -205,3 +205,58 @@ fn mcp_tree_exports_once_and_rejects_output_inside_root() {
     assert!(proc.wait().unwrap().success());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn duplicates_cli_and_mcp_report_verified_copies_without_deleting() {
+    let root = std::env::temp_dir().join(format!(
+        "filetree233-duplicates-integration-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("first"), b"identical").unwrap();
+    fs::write(root.join("second"), b"identical").unwrap();
+    fs::write(root.join("different"), b"different").unwrap();
+    fs::hard_link(root.join("first"), root.join("alias")).unwrap();
+    let cli = Command::new(env!("CARGO_BIN_EXE_filetree233"))
+        .arg("duplicates")
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(
+        cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    let expected: Value = serde_json::from_slice(&cli.stdout).unwrap();
+    assert_eq!(expected["complete"], true);
+    assert_eq!(expected["groups"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        expected["groups"][0]["objects"].as_array().unwrap().len(),
+        2
+    );
+    let mut proc = Command::new(env!("CARGO_BIN_EXE_filetree233"))
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = proc.stdin.take().unwrap();
+    let mut output = BufReader::new(proc.stdout.take().unwrap());
+    writeln!(input, "{}", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"duplicates","arguments":{"path":root,"threads":2}}})).unwrap();
+    input.flush().unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    let result: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(result["result"]["isError"], false);
+    let actual: Value =
+        serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(actual["groups"].as_array().unwrap().len(), 1);
+    assert_eq!(actual["groups"][0]["objects"].as_array().unwrap().len(), 2);
+    assert!(
+        root.join("first").exists() && root.join("second").exists() && root.join("alias").exists()
+    );
+    drop(input);
+    assert!(proc.wait().unwrap().success());
+    fs::remove_dir_all(root).unwrap();
+}
