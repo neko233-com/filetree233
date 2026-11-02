@@ -21,12 +21,13 @@ filetree233 scan /path/to/dir --json --threads 4
 filetree233 plan /path/to/cache -o /path/to/plan.json
 filetree233 apply /path/to/plan.json
 filetree233 mft-inspect /path/to/exported.MFT --record-size 1024 --used-only
+filetree233 mft-volume /path/to/ntfs/mount --name demo
 filetree233 serve               # MCP stdio
 ```
 
 GUI 中输入扫描路径，勾选文件或目录，填写不存在的计划文件路径，再创建计划。人工核对后输入界面显示的确认码，才能永久删除。计划文件不能放在待删目录内。
 
-离线 `mft-inspect` 按 JSON Lines 流式输出已导出的逻辑 MFT 记录、无效槽及最终统计；记录大小必须由来源确认，不能自行猜测。该接口会输出文件名等元数据，包含用于保留原始名称的 UTF-16 码元。离线解析不能证明记录完整，也不能替代实时卷扫描或作为删除依据。
+离线 `mft-inspect` 按 JSON Lines 流式输出已导出的逻辑 MFT 记录、无效槽及最终统计；记录大小必须由来源确认，不能自行猜测。该接口会输出文件名等元数据，包含用于保留原始名称的 UTF-16 码元。`mft-volume` 可只读访问 NTFS 挂载卷的 MFT，Windows 通常要求管理员权限；这是原始记录检查接口，不提供目录汇总或清理计划。离线解析不能证明记录完整，也不能替代实时卷扫描或作为删除依据。
 
 ## 一键安装
 

@@ -1,7 +1,7 @@
 use ntfs_mft::{MftStream, MftStreamOptions};
 use serde_json::json;
 use std::{
-    io::{self, Write},
+    io::{self, Read, Seek, Write},
     path::Path,
 };
 
@@ -17,6 +17,43 @@ pub fn inspect(
         .map_err(|e| e.to_string())?
         .resolve_extensions(true);
     let mut stream = MftStream::from_path(path, options).map_err(|e| e.to_string())?;
+    inspect_stream(
+        &mut stream,
+        used_only,
+        None,
+        false,
+        "logical_mft_stream",
+        out,
+    )
+}
+
+/// Read directly from an NTFS volume. This is observational and does not authorize cleanup.
+pub fn inspect_volume(path: &Path, name: Option<&str>, out: &mut impl Write) -> Result<(), String> {
+    let volume = ntfs_mft::Volume::from_mount_point(path).map_err(|e| e.to_string())?;
+    let raw = volume.raw_mft().map_err(|e| e.to_string())?;
+    let options = MftStreamOptions::new(raw.file_record_size())
+        .map_err(|e| e.to_string())?
+        .resolve_extensions(true);
+    let mut stream = MftStream::from_reader(raw.byte_reader().map_err(|e| e.to_string())?, options)
+        .map_err(|e| e.to_string())?;
+    inspect_stream(
+        &mut stream,
+        true,
+        name,
+        name.is_some(),
+        "live_ntfs_volume",
+        out,
+    )
+}
+
+fn inspect_stream<R: Read + Seek>(
+    stream: &mut MftStream<R>,
+    used_only: bool,
+    name: Option<&str>,
+    hide_invalid: bool,
+    source: &str,
+    out: &mut impl Write,
+) -> Result<(), String> {
     let mut parsed = 0u64;
     let mut invalid = 0u64;
     let mut displayed = 0u64;
@@ -28,6 +65,9 @@ pub fn inspect(
                     continue;
                 }
                 let entry = record.entry;
+                if name.is_some_and(|needle| !entry.file_name.to_string_lossy().contains(needle)) {
+                    continue;
+                }
                 let links: Vec<_> = entry.links.iter().map(|link| json!({"parent_reference":link.parent_reference.get(),"namespace":format!("{:?}",link.namespace),"name":link.file_name.to_string_lossy(),"name_utf16":link.file_name.as_utf16()})).collect();
                 let ads: Vec<_> = entry.alternate_data_streams.iter().map(|stream| json!({"name":stream.name.to_string_lossy(),"name_utf16":stream.name.as_utf16(),"logical_bytes":stream.real_size,"allocated_bytes":stream.allocated_size,"resident":stream.is_resident})).collect();
                 let value = json!({"type":"record","record_number":entry.record_number,"file_reference":entry.file_reference.get(),"parent_reference":entry.parent_reference.get(),"base_reference":entry.base_reference().map(|v| v.get()),"name":entry.file_name.to_string_lossy(),"name_utf16":entry.file_name.as_utf16(),"in_use":entry.is_used,"directory":entry.is_directory,"reparse":entry.is_reparse_point,"hard_links":entry.hard_link_count,"logical_bytes":entry.real_size,"allocated_bytes":entry.allocated_size,"links":links,"alternate_streams":ads,"metadata":format!("{:?}",record.metadata),"diagnostics":format!("{:?}",record.diagnostics),"external_payload_count":record.external_payloads.len()});
@@ -35,7 +75,13 @@ pub fn inspect(
                 displayed += 1;
             }
             Err(e) => {
+                if e.is_io_error() {
+                    return Err(format!("MFT read stopped at record {index}: {e}"));
+                }
                 invalid += 1;
+                if hide_invalid {
+                    continue;
+                }
                 writeln!(
                     out,
                     "{}",
@@ -45,8 +91,11 @@ pub fn inspect(
             }
         }
     }
-    writeln!(out, "{}", json!({"type":"summary","parsed_records":parsed,"invalid_records":invalid,"displayed_records":displayed,"source":"logical_mft_stream","complete":false,"note":"MFT-only data cannot prove complete metadata or live filesystem state"})).map_err(|e| e.to_string())?;
+    writeln!(out, "{}", json!({"type":"summary","parsed_records":parsed,"invalid_records":invalid,"displayed_records":displayed,"source":source,"complete":false,"note":"MFT-only data cannot prove complete metadata or live filesystem state"})).map_err(|e| e.to_string())?;
     out.flush().map_err(|e| e.to_string())
+}
+pub fn inspect_volume_stdout(path: &Path, name: Option<&str>) -> Result<(), String> {
+    inspect_volume(path, name, &mut io::stdout().lock())
 }
 pub fn inspect_stdout(path: &Path, record_size: usize, used_only: bool) -> Result<(), String> {
     inspect(path, record_size, used_only, &mut io::stdout().lock())

@@ -1,0 +1,22 @@
+name: Verify live NTFS MFT (read only)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  live-mft:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify privileges and file system
+        shell: pwsh
+        run: |
+          $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          if (-not $isAdmin) { throw 'Runner lacks Administrator access for read-only volume test' }
+          Get-Volume -DriveLetter C | Select-Object DriveLetter,FileSystem
+      - name: Scan temporary demo file through the raw MFT
+        env:
+          FILETREE233_TEST_LIVE_MFT: '1'
+        run: cargo test --release --locked --test mft_live -- --nocapture

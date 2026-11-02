@@ -40,6 +40,14 @@ enum Command {
         #[arg(long)]
         used_only: bool,
     },
+    /// Inspect raw MFT records on an NTFS volume (requires raw-volume access).
+    MftVolume {
+        /// The NTFS volume mount point (for example C:\ on Windows).
+        mount: PathBuf,
+        /// Show only records whose name contains this text; errors are counted in the summary.
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Create a cleanup plan for explicitly selected files and directories.
     Plan {
         #[arg(required = true)]
@@ -655,6 +663,7 @@ fn main() {
             Ok(())
         }),
         Command::MftInspect { path, record_size, used_only } => mft::inspect_stdout(&path, record_size, used_only),
+        Command::MftVolume { mount, name } => mft::inspect_volume_stdout(&mount, name.as_deref()),
         Command::Plan { paths, output } => save_plan(&paths, &output)
             .map(|v| println!("{}", serde_json::to_string_pretty(&v).unwrap())),
         Command::Apply { plan } => apply(&plan),
