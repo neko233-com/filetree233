@@ -84,6 +84,12 @@ fn live_ntfs_volume_finds_created_demo_file() {
     fs::write(demo.join("alpha/nested/data"), vec![1u8; 32768]).unwrap();
     fs::hard_link(demo.join("alpha/nested/data"), demo.join("beta/hardlink")).unwrap();
     fs::write(demo.join("root-file"), vec![2u8; 8192]).unwrap();
+    let external_link_target = root.join(format!(
+        "filetree233-external-hardlink-{}",
+        std::process::id()
+    ));
+    fs::write(&external_link_target, b"small resident content").unwrap();
+    fs::hard_link(&external_link_target, demo.join("alpha/external-hardlink")).unwrap();
     fs::write(demo.join("alpha").join("nested").join("中文.txt"), b"ok").unwrap();
     let sparse = demo.join("sparse.bin");
     let sparse_file = fs::File::create(&sparse).unwrap();
@@ -229,6 +235,7 @@ fn live_ntfs_volume_finds_created_demo_file() {
         "junction",
         "sparse.bin",
         "compressed.bin",
+        "external-hardlink",
     ] {
         assert!(
             entries.iter().any(|entry| entry["name"] == name),
@@ -246,4 +253,5 @@ fn live_ntfs_volume_finds_created_demo_file() {
     );
     assert_eq!(rows[0]["allocated_bytes"], walk["total_allocated_bytes"]);
     fs::remove_dir_all(demo).unwrap();
+    fs::remove_file(external_link_target).unwrap();
 }

@@ -147,6 +147,16 @@ impl Index {
     pub fn note_allocation_unknown(&mut self) {
         self.allocation_unknown += 1;
     }
+    /// Whether a file link's parent is inside the selected tree and traversable.
+    /// Call only after `finish_directories` has built the directory index.
+    pub fn includes_file_parent(&mut self, parent: u64) -> bool {
+        if let Some(tree) = &self.snapshot {
+            return tree.ids.get(&parent).is_some_and(|id| {
+                tree.nodes[*id as usize].error.as_deref() != Some("MFT reparse point skipped")
+            });
+        }
+        parent == self.root || self.owner(parent).is_some()
+    }
     pub fn add_file(&mut self, links: &[Link], logical: u64, allocated: u64) {
         if let Some(tree) = &mut self.snapshot {
             tree.add_file(links, logical, allocated);
@@ -353,6 +363,21 @@ mod tests {
             idx.add_directory(d);
         }
         idx.finish_directories();
+        for (parent, expected) in [
+            (5, true),
+            (11, true),
+            (20, true),
+            (30, false),
+            (31, false),
+            (40, false),
+            (999, false),
+        ] {
+            assert_eq!(
+                idx.includes_file_parent(parent),
+                expected,
+                "parent {parent}"
+            );
+        }
         assert_eq!(
             idx.file_path(Path::new("/demo"), &[link(11, "x")]),
             Some(Path::new("/demo").join("a").join("sub").join("x"))
@@ -393,6 +418,21 @@ mod tests {
             idx.add_directory(d);
         }
         idx.finish_directories();
+        for (parent, expected) in [
+            (5, true),
+            (11, true),
+            (20, true),
+            (30, false),
+            (31, false),
+            (40, false),
+            (999, false),
+        ] {
+            assert_eq!(
+                idx.includes_file_parent(parent),
+                expected,
+                "parent {parent}"
+            );
+        }
         assert!(idx.rows.is_empty() && idx.owners.is_empty() && idx.names.is_empty());
         assert_eq!(
             idx.file_path(Path::new("/demo"), &[link(31, "ignored"), link(11, "one")]),

@@ -255,6 +255,10 @@ fn scan_index(
         return Err("target directory reference not found in MFT; use filesystem scan".into());
     }
     index.finish_directories();
+    // Most records of a volume are outside a subdirectory scan. Avoid creating
+    // link names and opening resident/sparse files until a parent is in scope.
+    // For a volume-root scan, avoid the extra lookup on every file.
+    let filter_parents = root_id & 0x0000_ffff_ffff_ffff != 5;
     for record in raw.scan_entries().map_err(|e| e.to_string())? {
         if cancelled.load(Ordering::Relaxed) {
             return Err("scan cancelled".into());
@@ -266,6 +270,9 @@ fn scan_index(
         }
         let mut links = Vec::new();
         if entry.links.is_empty() {
+            if filter_parents && !index.includes_file_parent(entry.parent_reference.get()) {
+                continue;
+            }
             links.push(Link {
                 parent: entry.parent_reference.get(),
                 name: OsString::from_wide(entry.file_name.as_utf16()),
@@ -280,11 +287,17 @@ fn scan_index(
                 {
                     continue;
                 }
+                if filter_parents && !index.includes_file_parent(link.parent_reference.get()) {
+                    continue;
+                }
                 links.push(Link {
                     parent: link.parent_reference.get(),
                     name: OsString::from_wide(link.file_name.as_utf16()),
                 });
             }
+        }
+        if links.is_empty() {
+            continue;
         }
         // Only materialize a full path when special allocation needs a Win32 query.
         let allocated = if entry.is_resident || entry.is_sparse || entry.is_compressed {
