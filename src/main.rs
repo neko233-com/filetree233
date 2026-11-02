@@ -394,6 +394,9 @@ fn scan_with_threads(path: &Path, threads: u8) -> Result<Value, String> {
     )
 }
 fn scan_dispatch(path: &Path, threads: u8, engine: ScanEngine) -> Result<Value, String> {
+    if !(1..=32).contains(&threads) {
+        return Err("threads must be between 1 and 32".into());
+    }
     match engine {
         ScanEngine::Walk => scan_with_threads(path, threads),
         ScanEngine::Mft => mft::scan_tree(path),
@@ -641,7 +644,7 @@ fn serve() -> Result<(), String> {
                     }
                 } else {
                     let result = match name {
-                        "scan" => (|| { let path = args["path"].as_str().ok_or("path required")?; let threads = if args.get("threads").is_some() { u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")? } else { 4 }; let engine = match args["engine"].as_str().unwrap_or("walk") { "walk" => ScanEngine::Walk, "mft" => ScanEngine::Mft, "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; scan_dispatch(Path::new(path), threads, engine) })(),
+                        "scan" => (|| { let path = args["path"].as_str().ok_or("path required")?; let threads = if args.get("threads").is_some() { u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")? } else { 4 }; let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; scan_dispatch(Path::new(path), threads, engine) })(),
                         "plan" => (|| { let paths = args["paths"].as_array().ok_or("paths required")?.iter().map(|v| v.as_str().map(PathBuf::from).ok_or("invalid path")).collect::<Result<Vec<_>,_>>()?; let out = args["output"].as_str().ok_or("output required")?; save_plan(&paths, Path::new(out)) })(),
                         "apply" => Err("client must support human elicitation, and only one confirmation can be pending".into()),
                         _ => Err("unknown tool".into())
@@ -860,6 +863,21 @@ mod tests {
             parallel["total_allocated_bytes"],
             serial["total_allocated_bytes"]
         );
+    }
+    #[cfg(not(windows))]
+    #[test]
+    fn automatic_engine_reports_fallback_on_unsupported_platform() {
+        let f = Fixture::new();
+        fs::write(f.0.join("demo"), b"test").unwrap();
+        let result = scan_dispatch(&f.0, 2, ScanEngine::Auto).unwrap();
+        assert_eq!(result["engine"], "filesystem_walk");
+        assert!(
+            result["fallback_reason"]
+                .as_str()
+                .unwrap()
+                .contains("Windows only")
+        );
+        assert_eq!(result["entries"][0]["bytes"], 4);
     }
     #[test]
     fn sparse_demo_reports_allocated_below_logical() {

@@ -184,8 +184,16 @@ pub fn scan_tree(path: &Path) -> Result<serde_json::Value, String> {
         .position(|c| *c == 0)
         .ok_or("invalid mount path")?;
     let mount = OsString::from_wide(&mount[..n]);
-    let volume =
-        ntfs_mft::Volume::from_mount_point(Path::new(&mount)).map_err(|e| e.to_string())?;
+    let mount_text = mount.to_string_lossy();
+    let display_mount = mount_text.strip_prefix(r"\\?\").unwrap_or(&mount_text);
+    let b = display_mount.as_bytes();
+    let volume = if b.len() == 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\' {
+        ntfs_mft::Volume::from_drive_letter(b[0] as char).map_err(|e| e.to_string())?
+    } else {
+        // The dependency adds its own trailing backslash for a mounted folder.
+        ntfs_mft::Volume::from_mount_point(Path::new(display_mount.trim_end_matches('\\')))
+            .map_err(|e| e.to_string())?
+    };
     let raw = volume.raw_mft().map_err(|e| e.to_string())?;
     let mut index = Index::new(root_id);
     let mut root_found = root_id & 0x0000_ffff_ffff_ffff == 5;
