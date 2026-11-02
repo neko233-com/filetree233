@@ -25,6 +25,9 @@ enum Command {
         path: PathBuf,
         #[arg(long)]
         json: bool,
+        /// Parallel top-level workers (1-32).
+        #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=32))]
+        threads: u8,
     },
     /// Create a cleanup plan for explicitly selected files and directories.
     Plan {
@@ -158,7 +161,7 @@ fn summarize(
 const MAX_SCAN_ERRORS: usize = 50;
 fn analyze_entry(
     path: &Path,
-    seen_links: &mut std::collections::HashSet<allocation::FileId>,
+    seen_links: &std::sync::Mutex<std::collections::HashSet<allocation::FileId>>,
 ) -> Value {
     let mut stack = vec![path.to_path_buf()];
     let (mut bytes, mut allocated, mut files, mut directories, mut error_count, mut alloc_errors) =
@@ -187,7 +190,9 @@ fn analyze_entry(
             files += 1;
             match allocation::file_allocation(&p, &m) {
                 Ok(a) => {
-                    if a.shared_id.is_none_or(|id| seen_links.insert(id)) {
+                    if a.shared_id
+                        .is_none_or(|id| seen_links.lock().expect("link set poisoned").insert(id))
+                    {
                         allocated = allocated.saturating_add(a.bytes);
                     }
                 }
@@ -212,9 +217,12 @@ fn analyze_entry(
                                             files += 1;
                                             match allocation::file_allocation(&child, &m) {
                                                 Ok(a) => {
-                                                    if a.shared_id
-                                                        .is_none_or(|id| seen_links.insert(id))
-                                                    {
+                                                    if a.shared_id.is_none_or(|id| {
+                                                        seen_links
+                                                            .lock()
+                                                            .expect("link set poisoned")
+                                                            .insert(id)
+                                                    }) {
                                                         allocated =
                                                             allocated.saturating_add(a.bytes);
                                                     }
@@ -251,7 +259,14 @@ fn analyze_entry(
     drop(record_error);
     json!({"path":path,"bytes":bytes,"allocated_attributed_bytes":allocated,"allocation_errors":alloc_errors,"files":files,"directories":directories,"complete":error_count == 0,"error_count":error_count,"errors":errors})
 }
+#[cfg(test)]
 fn scan(path: &Path) -> Result<Value, String> {
+    scan_with_threads(path, 1)
+}
+fn scan_with_threads(path: &Path, threads: u8) -> Result<Value, String> {
+    if !(1..=32).contains(&threads) {
+        return Err("threads must be between 1 and 32".into());
+    }
     let root = fs::canonicalize(path).map_err(err)?;
     if !root.is_dir() {
         return Err("scan path must be a directory".into());
@@ -265,10 +280,31 @@ fn scan(path: &Path) -> Result<Value, String> {
         }
     }
     children.sort();
-    let mut seen_links = std::collections::HashSet::new();
-    for child in children {
-        entries.push(analyze_entry(&child, &mut seen_links));
-    }
+    let seen_links = std::sync::Mutex::new(std::collections::HashSet::new());
+    let jobs = std::sync::atomic::AtomicUsize::new(0);
+    let output = std::sync::Mutex::new(Vec::with_capacity(children.len()));
+    let worker_count = usize::min(usize::from(threads), children.len());
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            scope.spawn(|| {
+                loop {
+                    let i = jobs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(child) = children.get(i) {
+                        let value = analyze_entry(child, &seen_links);
+                        output
+                            .lock()
+                            .expect("scan output poisoned")
+                            .push((i, value));
+                    } else {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    let mut results = output.into_inner().map_err(err)?;
+    results.sort_unstable_by_key(|(index, _)| *index);
+    entries.extend(results.into_iter().map(|(_, value)| value));
     entries.sort_by(|a, b| {
         b["bytes"]
             .as_u64()
@@ -280,7 +316,7 @@ fn scan(path: &Path) -> Result<Value, String> {
         .filter_map(|v| v["allocated_attributed_bytes"].as_u64())
         .fold(0u64, u64::saturating_add);
     Ok(
-        json!({"root":root,"size_kind":"logical_bytes","allocation_kind":"unique_file_allocation_attributed_by_path","total_allocated_bytes":total_allocated_bytes,"complete":entries.iter().all(|v| v["complete"] == true),"entries":entries}),
+        json!({"root":root,"engine":"filesystem_walk","threads":worker_count,"size_kind":"logical_bytes","allocation_kind":"unique_file_allocation_attributed_first_seen","total_allocated_bytes":total_allocated_bytes,"complete":entries.iter().all(|v| v["complete"] == true),"entries":entries}),
     )
 }
 fn make_plan(paths: &[PathBuf], output: &Path) -> Result<Plan, String> {
@@ -486,7 +522,7 @@ fn serve() -> Result<(), String> {
             }
             "ping" => json!({"jsonrpc":"2.0","id":id,"result":{}}),
             "tools/list" => json!({"jsonrpc":"2.0","id":id,"result":{"tools":[
-                {"name":"scan","description":"Analyze immediate children, reporting logical bytes and errors.","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},
+                {"name":"scan","description":"Analyze immediate children with optional parallel workers, reporting logical bytes, attributed allocation and errors.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32}},"required":["path"]}},
                 {"name":"plan","description":"Create a cleanup plan for explicitly selected files and directories; no deletion.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"},"minItems":1},"output":{"type":"string"}},"required":["paths","output"]}},
                 {"name":"apply","description":"Permanently delete a previously planned set of files and directories after client-mediated human confirmation and revalidation.","annotations":{"destructiveHint":true,"openWorldHint":false},"inputSchema":{"type":"object","properties":{"plan":{"type":"string"}},"required":["plan"]}}
             ]}}),
@@ -517,7 +553,7 @@ fn serve() -> Result<(), String> {
                     }
                 } else {
                     let result = match name {
-                        "scan" => args["path"].as_str().ok_or("path required".to_string()).and_then(|p| scan(Path::new(p))),
+                        "scan" => (|| { let path = args["path"].as_str().ok_or("path required")?; let threads = if args.get("threads").is_some() { u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")? } else { 4 }; scan_with_threads(Path::new(path), threads) })(),
                         "plan" => (|| { let paths = args["paths"].as_array().ok_or("paths required")?.iter().map(|v| v.as_str().map(PathBuf::from).ok_or("invalid path")).collect::<Result<Vec<_>,_>>()?; let out = args["output"].as_str().ok_or("output required")?; save_plan(&paths, Path::new(out)) })(),
                         "apply" => Err("client must support human elicitation, and only one confirmation can be pending".into()),
                         _ => Err("unknown tool".into())
@@ -536,7 +572,7 @@ fn serve() -> Result<(), String> {
 }
 fn main() {
     let result = match Cli::parse().command.unwrap_or(Command::Gui) {
-        Command::Scan { path, json } => scan(&path).and_then(|v| {
+        Command::Scan { path, json, threads } => scan_with_threads(&path, threads).and_then(|v| {
             if json {
                 println!("{}", serde_json::to_string_pretty(&v).map_err(err)?);
             } else {
@@ -676,6 +712,38 @@ mod tests {
                 .sum::<u64>(),
             expected
         );
+    }
+    #[test]
+    fn parallel_scan_keeps_logical_counts_and_global_hard_link_allocation() {
+        let f = Fixture::new();
+        for n in 0..8 {
+            fs::create_dir(f.0.join(format!("dir{n}"))).unwrap();
+        }
+        let original = f.0.join("dir0/original");
+        fs::write(&original, vec![7; 32768]).unwrap();
+        for n in 1..8 {
+            fs::hard_link(&original, f.0.join(format!("dir{n}/link"))).unwrap();
+        }
+        let serial = scan_with_threads(&f.0, 1).unwrap();
+        for _ in 0..4 {
+            let parallel = scan_with_threads(&f.0, 4).unwrap();
+            assert_eq!(parallel["complete"], true);
+            assert_eq!(
+                parallel["total_allocated_bytes"],
+                serial["total_allocated_bytes"]
+            );
+            let sum = |v: &Value| {
+                v["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|e| e["bytes"].as_u64().unwrap())
+                    .sum::<u64>()
+            };
+            assert_eq!(sum(&parallel), sum(&serial));
+        }
+        assert!(scan_with_threads(&f.0, 0).is_err());
+        assert!(scan_with_threads(&f.0, 33).is_err());
     }
     #[test]
     fn sparse_demo_reports_allocated_below_logical() {

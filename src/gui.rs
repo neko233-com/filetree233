@@ -1,4 +1,4 @@
-use crate::{delete_checked, plan_description, read_checked_plan, save_plan, scan};
+use crate::{delete_checked, plan_description, read_checked_plan, save_plan, scan_with_threads};
 use eframe::egui::{self, Color32, RichText, Sense, Vec2};
 use std::{
     path::PathBuf,
@@ -57,6 +57,7 @@ fn install_system_font(ctx: &egui::Context) {
 struct App {
     path: String,
     filter: String,
+    threads: u8,
     entries: Vec<serde_json::Value>,
     selected: Vec<PathBuf>,
     status: String,
@@ -75,6 +76,7 @@ impl Default for App {
                 .display()
                 .to_string(),
             filter: String::new(),
+            threads: 4,
             entries: vec![],
             selected: vec![],
             status: "Choose a directory and scan. Sizes are logical bytes.".into(),
@@ -96,6 +98,7 @@ impl App {
             return;
         }
         let path = PathBuf::from(&self.path);
+        let threads = self.threads;
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         self.status = "Scanning...".into();
@@ -104,7 +107,7 @@ impl App {
         self.plan_data = None;
         self.rx = Some(rx);
         thread::spawn(move || {
-            let _ = tx.send(scan(&path));
+            let _ = tx.send(scan_with_threads(&path, threads));
             ctx.request_repaint();
         });
     }
@@ -148,6 +151,8 @@ impl eframe::App for App {
                 }
             });
             ui.horizontal(|ui| {
+                ui.label("Workers");
+                ui.add(egui::DragValue::new(&mut self.threads).range(1..=32));
                 ui.label("Filter");
                 ui.text_edit_singleline(&mut self.filter);
                 ui.label(&self.status);
