@@ -249,7 +249,28 @@ pub fn scan_tree(path: &Path) -> Result<serde_json::Value, String> {
                 }
             }
         }
-        index.add_file(&links, entry.real_size, entry.allocated_size);
+        let Some(path) = index.file_path(&root, &links) else {
+            continue;
+        };
+        // The raw allocation field can be virtual for sparse/compressed streams and
+        // differs from Win32 allocation for MFT-resident data. Query only those cases.
+        let allocated = if entry.is_resident || entry.is_sparse || entry.is_compressed {
+            match fs::symlink_metadata(&path).and_then(|m| {
+                if crate::is_reparse(&m) || !m.is_file() {
+                    return Err(io::Error::other("file changed during scan"));
+                }
+                crate::allocation::file_allocation(&path, &m)
+            }) {
+                Ok(a) => a.bytes,
+                Err(_) => {
+                    index.note_allocation_unknown();
+                    0
+                }
+            }
+        } else {
+            entry.allocated_size
+        };
+        index.add_file(&links, entry.real_size, allocated);
     }
     Ok(index.finish(&root))
 }

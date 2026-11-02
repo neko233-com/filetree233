@@ -30,6 +30,7 @@ pub struct Index {
     names: HashMap<u64, String>,
     rows: BTreeMap<String, Total>,
     pub skipped: u64,
+    allocation_unknown: u64,
 }
 impl Index {
     pub fn new(root: u64) -> Self {
@@ -40,6 +41,7 @@ impl Index {
             names: HashMap::new(),
             rows: BTreeMap::new(),
             skipped: 0,
+            allocation_unknown: 0,
         }
     }
     pub fn add_directory(&mut self, d: Directory) {
@@ -97,6 +99,36 @@ impl Index {
         }
         result
     }
+    pub fn file_path(&mut self, root_path: &Path, links: &[Link]) -> Option<std::path::PathBuf> {
+        for link in links {
+            if link.parent == self.root {
+                return Some(root_path.join(&link.name));
+            }
+            if self.owner(link.parent).is_none() {
+                continue;
+            }
+            let mut parts = Vec::new();
+            let mut cursor = link.parent;
+            while cursor != self.root {
+                let dir = self.dirs.get(&cursor)?;
+                if dir.reparse {
+                    return None;
+                }
+                parts.push(dir.name.clone());
+                cursor = dir.parent;
+            }
+            let mut path = root_path.to_path_buf();
+            for part in parts.into_iter().rev() {
+                path.push(part);
+            }
+            path.push(&link.name);
+            return Some(path);
+        }
+        None
+    }
+    pub fn note_allocation_unknown(&mut self) {
+        self.allocation_unknown += 1;
+    }
     pub fn add_file(&mut self, links: &[Link], logical: u64, allocated: u64) {
         let mut assigned = false;
         for link in links {
@@ -129,7 +161,7 @@ impl Index {
             .iter()
             .filter_map(|e| e["allocated_attributed_bytes"].as_u64())
             .fold(0u64, u64::saturating_add);
-        json!({"root":root_path.to_string_lossy(),"engine":"mft_fast","threads":1,"size_kind":"logical_bytes","allocation_kind":"unique_file_allocation_attributed_first_seen","total_allocated_bytes":total,"complete":false,"unresolved_cycles":self.skipped,"entries":entries})
+        json!({"root":root_path.to_string_lossy(),"engine":"mft_fast","threads":1,"size_kind":"logical_bytes","allocation_kind":"unique_file_allocation_attributed_first_seen","total_allocated_bytes":total,"complete":false,"unresolved_cycles":self.skipped,"allocation_unknown":self.allocation_unknown,"entries":entries})
     }
 }
 #[cfg(test)]
@@ -164,6 +196,11 @@ mod tests {
             idx.add_directory(d);
         }
         idx.finish_directories();
+        assert_eq!(
+            idx.file_path(Path::new("/demo"), &[link(11, "x")]),
+            Some(Path::new("/demo").join("a").join("sub").join("x"))
+        );
+        assert_eq!(idx.file_path(Path::new("/demo"), &[link(31, "no")]), None);
         idx.add_file(&[link(11, "x"), link(20, "y")], 100, 128);
         idx.add_file(&[link(31, "no")], 999, 1024);
         idx.add_file(&[link(5, "rootfile")], 7, 8);
