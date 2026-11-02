@@ -20,7 +20,6 @@ pub struct Options {
 }
 #[derive(Debug)]
 pub struct Hit {
-    pub id: u32,
     pub path: PathBuf,
     pub is_dir: bool,
     pub logical: u64,
@@ -91,7 +90,6 @@ pub fn find(tree: &Snapshot, opts: &Options) -> Result<Report, String> {
         .map(|(_, id)| {
             let node = &tree.nodes[id as usize];
             Hit {
-                id,
                 path: tree.path(id),
                 is_dir: node.is_dir,
                 logical: node.logical,

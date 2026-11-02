@@ -47,8 +47,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev libgl1-mesa-dev libx11-dev libxcb1-dev libxrandr-dev libxi-dev libxcursor-dev
       - run: cargo test --release --locked --target ${{ matrix.target }}
       - name: Verify real NTFS fast path
         if: runner.os == 'Windows'

@@ -1,7 +1,6 @@
 mod allocation;
 mod benchmark;
 mod duplicates;
-mod gui;
 mod mft;
 #[cfg(any(windows, test))]
 mod mft_index;
@@ -11,9 +10,8 @@ mod recommend;
 mod recycle;
 mod search;
 mod tree;
-mod treemap;
 mod volumes;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -37,8 +35,6 @@ enum ScanEngine {
 }
 #[derive(Subcommand)]
 enum Command {
-    /// Open the graphical disk analyzer.
-    Gui,
     /// List mounted volumes and available capacity.
     Volumes,
     /// Query filesystem capacity for an explicit path, including mounts not in the automatic list.
@@ -813,7 +809,12 @@ fn serve() -> Result<(), String> {
     Ok(())
 }
 fn main() {
-    let result = match Cli::parse().command.unwrap_or(Command::Gui) {
+    let Some(command) = Cli::parse().command else {
+        Cli::command().print_help().expect("print command help");
+        println!();
+        return;
+    };
+    let result = match command {
         Command::Volumes => volumes::list_json().and_then(|value| { println!("{}",serde_json::to_string_pretty(&value).map_err(err)?); Ok(()) }),
         Command::Capacity { path } => volumes::capacity(&path).and_then(|value| { println!("{}",serde_json::to_string_pretty(&value).map_err(err)?); Ok(()) }),
         Command::Scan { path, json, threads, engine } => scan_dispatch(&path, threads, engine).and_then(|v| {
@@ -863,7 +864,6 @@ fn main() {
             .map(|v| println!("{}", serde_json::to_string_pretty(&v).unwrap())),
         Command::Apply { plan } => apply(&plan),
         Command::Serve => serve(),
-        Command::Gui => gui::run(),
     };
     if let Err(e) = result {
         eprintln!("Error: {e}");

@@ -1,4 +1,4 @@
-//! Compact, in-memory filesystem tree for interactive navigation.
+//! Compact, in-memory filesystem tree for analysis and export.
 use crate::{allocation, is_reparse};
 use std::{
     collections::HashSet,
@@ -72,11 +72,9 @@ impl Snapshot {
             (next != NONE).then_some(next)
         })
     }
+    #[cfg(test)]
     pub fn children(&self, id: u32) -> Vec<u32> {
         self.child_ids(id).collect()
-    }
-    pub fn parent(&self, id: u32) -> Option<u32> {
-        (id != 0).then(|| self.nodes[id as usize].parent)
     }
 }
 struct Queue {
@@ -553,21 +551,6 @@ mod tests {
             .unwrap()
             .bytes;
         assert_eq!(tree.nodes[0].allocated, expected);
-        let area = eframe::egui::Rect::from_min_size(
-            eframe::egui::pos2(0.0, 0.0),
-            eframe::egui::vec2(200.0, 100.0),
-        );
-        let tiles = crate::treemap::layout(&tree, 0, area, 2);
-        assert!(tiles.len() <= 2);
-        assert!(!tiles.is_empty());
-        let sum: f32 = tiles.iter().map(|t| t.rect.width() * t.rect.height()).sum();
-        assert!((sum - area.width() * area.height()).abs() < 0.1);
-        for i in 0..tiles.len() {
-            assert!(area.contains_rect(tiles[i].rect));
-            for j in i + 1..tiles.len() {
-                assert!(!tiles[i].rect.intersect(tiles[j].rect).is_positive());
-            }
-        }
         let a = tree
             .children(0)
             .into_iter()
