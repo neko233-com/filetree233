@@ -82,6 +82,11 @@ struct App {
     duplicate_cancelled: Arc<AtomicBool>,
     duplicate_progress: Arc<AtomicU64>,
     duplicate_window_open: bool,
+    recommendations: Option<crate::recommend::Report>,
+    recommendation_rx: Option<Receiver<Result<crate::recommend::Report, String>>>,
+    recommendation_window_open: bool,
+    #[cfg(test)]
+    suggestion_rects: Vec<(PathBuf, egui::Rect)>,
     tree_current: u32,
     expanded: HashSet<u32>,
     visible_rows: Vec<(u32, usize)>,
@@ -123,6 +128,11 @@ impl Default for App {
             duplicate_cancelled: Arc::new(AtomicBool::new(false)),
             duplicate_progress: Arc::new(AtomicU64::new(0)),
             duplicate_window_open: false,
+            recommendations: None,
+            recommendation_rx: None,
+            recommendation_window_open: false,
+            #[cfg(test)]
+            suggestion_rects: Vec::new(),
             tree_current: 0,
             expanded: HashSet::new(),
             visible_rows: Vec::new(),
@@ -172,6 +182,9 @@ impl App {
         self.duplicate_rx = None;
         self.duplicates = None;
         self.duplicate_window_open = false;
+        self.recommendations = None;
+        self.recommendation_rx = None;
+        self.recommendation_window_open = false;
         self.tree_current = 0;
         self.expanded.clear();
         self.expanded.insert(0);
@@ -259,6 +272,30 @@ impl eframe::App for App {
                 Err(e) => self.status = e,
             }
             self.duplicate_rx = None;
+        }
+        if let Some(rx) = &self.recommendation_rx
+            && let Ok(result) = rx.try_recv()
+        {
+            match result {
+                Ok(report) => {
+                    self.status = format!(
+                        "Cleanup suggestions: {}{}",
+                        report.total_candidates,
+                        if report.complete {
+                            ""
+                        } else {
+                            " (incomplete scan)"
+                        }
+                    );
+                    self.recommendations = Some(report);
+                    self.recommendation_window_open = true;
+                }
+                Err(error) => self.status = error,
+            }
+            self.recommendation_rx = None;
+        }
+        if self.recommendation_rx.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
         if self.duplicate_rx.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
@@ -372,6 +409,9 @@ impl eframe::App for App {
                                         self.tree = None;
                                         self.duplicates = None;
                                         self.duplicate_window_open = false;
+                                        self.recommendations = None;
+                                        self.recommendation_rx = None;
+                                        self.recommendation_window_open = false;
                                         self.selected.clear();
                                     }
                                     Err(e) => self.status = e,
@@ -386,6 +426,7 @@ impl eframe::App for App {
         if self.tree.is_some() {
             self.show_tree(ctx);
             self.show_duplicates(ctx);
+            self.show_recommendations(ctx);
             return;
         }
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -505,6 +546,19 @@ impl App {
                         if ui.button("Cancel search").clicked() {
                             self.duplicate_cancelled.store(true, Ordering::Relaxed);
                         }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if self.recommendation_rx.is_none() {
+                        if ui.button("Suggest cleanup").clicked() {
+                            self.begin_recommendations(Arc::clone(&tree), ctx);
+                        }
+                        if self.recommendations.is_some() && ui.button("Show suggestions").clicked()
+                        {
+                            self.recommendation_window_open = true;
+                        }
+                    } else {
+                        ui.label("Analyzing suggestions...");
                     }
                 });
                 if self.visible_dirty {
@@ -685,6 +739,64 @@ impl App {
     }
 }
 
+impl App {
+    fn begin_recommendations(&mut self, tree: Arc<crate::tree::Snapshot>, ctx: &egui::Context) {
+        if self.recommendation_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.recommendation_rx = Some(rx);
+        self.recommendations = None;
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::recommend::analyze(&tree)
+            }))
+            .map_err(|_| "suggestion worker failed unexpectedly".to_string());
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
+    fn show_recommendations(&mut self, ctx: &egui::Context) {
+        if !self.recommendation_window_open {
+            return;
+        }
+        let Some(report) = self.recommendations.take() else {
+            return;
+        };
+        let mut open = self.recommendation_window_open;
+        #[cfg(test)]
+        self.suggestion_rects.clear();
+        egui::Window::new("Cleanup suggestions").open(&mut open).resizable(true).default_size([760.0, 520.0]).show(ctx, |ui| {
+            ui.label("Heuristics only. Review each path and risk; no files are selected automatically. Create a cleanup plan to verify and confirm.");
+            if !report.complete { ui.colored_label(Color32::LIGHT_RED, "Scan incomplete; suggestions may be missing or sizes inaccurate."); }
+            if report.total_candidates > report.candidates.len() as u64 { ui.colored_label(Color32::LIGHT_RED, format!("Showing {} of {} suggestions",report.candidates.len(),report.total_candidates)); }
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for c in &report.candidates {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let mut selected = self.selected.contains(&c.path);
+                        let response = ui.checkbox(&mut selected, "");
+                        #[cfg(test)]
+                        self.suggestion_rects.push((c.path.clone(), response.rect));
+                        if response.changed() {
+                            if selected { self.selected.push(c.path.clone()); } else { self.selected.retain(|p| p != &c.path); }
+                            self.plan_data = None;
+                        }
+                        ui.strong(c.path.to_string_lossy());
+                    });
+                    ui.label(format!("{} | {} logical bytes | {} attributed allocated bytes | {} files{}",c.rule,c.logical,c.allocated,c.files,if c.complete {""} else {" | INCOMPLETE"}));
+                    ui.label(c.reason);
+                    ui.colored_label(Color32::YELLOW, c.risk);
+                }
+                if report.candidates.is_empty() { ui.label("No matching suggestions."); }
+            });
+        });
+        self.recommendation_window_open = open;
+        self.recommendations = Some(report);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,6 +857,74 @@ mod tests {
         let _ = ctx.run(input(true), |ctx| app.show_tree(ctx));
         let _ = ctx.run(input(false), |ctx| app.show_tree(ctx));
         assert!(app.selected.contains(&expected));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn suggestion_dialog_requires_explicit_selection() {
+        let root = std::env::temp_dir().join(format!(
+            "filetree233-gui-suggest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), b"[package]").unwrap();
+        std::fs::write(root.join("target/output"), b"demo").unwrap();
+        let (stop, progress) = crate::tree::new_controls();
+        let tree = crate::tree::scan(&root, 2, &stop, &progress).unwrap();
+        let report = crate::recommend::analyze(&tree);
+        assert_eq!(report.candidates.len(), 1);
+        let expected = report.candidates[0].path.clone();
+        let mut app = App {
+            recommendations: Some(report),
+            recommendation_window_open: true,
+            plan_data: Some(vec![1]),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let size = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1100.0, 720.0),
+        ));
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: size,
+                ..Default::default()
+            },
+            |ctx| app.show_recommendations(ctx),
+        );
+        assert!(app.selected.is_empty());
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: size,
+                ..Default::default()
+            },
+            |ctx| app.show_recommendations(ctx),
+        );
+        let position = app.suggestion_rects[0].1.center();
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: size,
+                    events: vec![
+                        egui::Event::PointerMoved(position),
+                        egui::Event::PointerButton {
+                            pos: position,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ctx| app.show_recommendations(ctx),
+            );
+        }
+        assert_eq!(app.selected, vec![expected]);
+        assert!(app.plan_data.is_none());
+        assert!(root.join("target/output").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 }
