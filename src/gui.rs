@@ -155,6 +155,8 @@ struct App {
     status: String,
     rx: Option<Receiver<Result<ScanResult, String>>>,
     cleanup_mode: CleanupMode,
+    export_path: String,
+    export_rx: Option<Receiver<Result<serde_json::Value, String>>>,
     plan_path: String,
     plan_data: Option<Vec<u8>>,
     plan_details: String,
@@ -225,6 +227,8 @@ impl Default for App {
                 .display()
                 .to_string(),
             cleanup_mode: CleanupMode::Recycle,
+            export_path: String::new(),
+            export_rx: None,
             plan_data: None,
             plan_details: String::new(),
             token: String::new(),
@@ -303,6 +307,29 @@ impl App {
         } else {
             self.status = "This path cannot be represented in the text field; navigation remains in the current snapshot".into();
         }
+    }
+    fn begin_export(&mut self, format: crate::tree::ExportFormat, ctx: &egui::Context) {
+        if self.export_rx.is_some() {
+            return;
+        }
+        let Some(tree) = self.tree.as_ref().cloned() else {
+            return;
+        };
+        let output = PathBuf::from(&self.export_path);
+        let (tx, rx) = mpsc::channel();
+        self.export_rx = Some(rx);
+        self.status = "Exporting snapshot...".into();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::tree::export_snapshot(&tree, &output, format)
+            }))
+            .unwrap_or_else(|_| {
+                Err("export worker failed unexpectedly; a partial file may remain".into())
+            });
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
     }
     fn begin_volumes(&mut self, ctx: &egui::Context) {
         if self.volume_rx.is_some() {
@@ -396,6 +423,18 @@ impl eframe::App for App {
             self.volume_rx = None;
         }
         if self.volume_rx.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        if let Some(rx) = &self.export_rx
+            && let Ok(result) = rx.try_recv()
+        {
+            match result {
+                Ok(value) => self.status = format!("Exported: {value}"),
+                Err(error) => self.status = error,
+            }
+            self.export_rx = None;
+        }
+        if self.export_rx.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
         if let Some(rx) = &self.rx
@@ -577,6 +616,26 @@ impl eframe::App for App {
         egui::TopBottomPanel::bottom("bottom")
             .resizable(true)
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Export file");
+                    ui.add(egui::TextEdit::singleline(&mut self.export_path).desired_width(420.0));
+                    let enabled = self.tree.is_some() && self.export_rx.is_none();
+                    if ui
+                        .add_enabled(enabled, egui::Button::new("Export CSV"))
+                        .clicked()
+                    {
+                        self.begin_export(crate::tree::ExportFormat::Csv, ctx);
+                    }
+                    if ui
+                        .add_enabled(enabled, egui::Button::new("Export JSONL"))
+                        .clicked()
+                    {
+                        self.begin_export(crate::tree::ExportFormat::Jsonl, ctx);
+                    }
+                    if self.export_rx.is_some() {
+                        ui.label("Exporting...");
+                    }
+                });
                 ui.horizontal(|ui| {
                     ui.label("Plan file");
                     ui.add(egui::TextEdit::singleline(&mut self.plan_path).desired_width(420.0));
@@ -1431,5 +1490,50 @@ mod tests {
         assert!(app.plan_data.is_none());
         assert!(root.join("demo.log").exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn export_worker_uses_snapshot_and_does_not_overwrite() {
+        let base = std::env::temp_dir().join(format!(
+            "filetree233-gui-export-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = base.join("scan");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("file"), b"demo").unwrap();
+        let (stop, progress) = crate::tree::new_controls();
+        let tree = crate::tree::scan(&root, 2, &stop, &progress).unwrap();
+        let output = base.join("snapshot.csv");
+        let mut app = App {
+            tree: Some(Arc::new(tree)),
+            export_path: output.display().to_string(),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        app.begin_export(crate::tree::ExportFormat::Csv, &ctx);
+        let result = app
+            .export_rx
+            .take()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result["format"], "csv");
+        let original = std::fs::read(&output).unwrap();
+        app.begin_export(crate::tree::ExportFormat::Csv, &ctx);
+        assert!(
+            app.export_rx
+                .take()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&output).unwrap(), original);
+        assert!(root.join("file").exists());
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

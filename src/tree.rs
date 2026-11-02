@@ -306,8 +306,98 @@ pub fn raw_units(name: &std::ffi::OsStr) -> Vec<u32> {
         Vec::new()
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ExportFormat {
+    Jsonl,
+    Csv,
+}
+fn spreadsheet_safe(text: &str) -> (std::borrow::Cow<'_, str>, bool) {
+    let first = text
+        .trim_start_matches([' ', '\t', '\r', '\n'])
+        .chars()
+        .next();
+    if text.starts_with(['\t', '\r', '\n'])
+        || first.is_some_and(|c| matches!(c, '=' | '+' | '-' | '@'))
+    {
+        (std::borrow::Cow::Owned(format!("'{text}")), true)
+    } else {
+        (std::borrow::Cow::Borrowed(text), false)
+    }
+}
 impl Snapshot {
     /// Write a parent-indexed JSONL snapshot without building one giant JSON document.
+    pub fn write_export(
+        &self,
+        out: &mut impl std::io::Write,
+        format: ExportFormat,
+    ) -> Result<(), String> {
+        match format {
+            ExportFormat::Jsonl => self.write_jsonl(out),
+            ExportFormat::Csv => self.write_csv(out),
+        }
+    }
+    pub fn write_csv(&self, out: &mut impl std::io::Write) -> Result<(), String> {
+        let mut writer = csv::Writer::from_writer(out);
+        writer
+            .write_record([
+                "id",
+                "parent",
+                "path",
+                "name",
+                "path_units",
+                "name_units",
+                "name_encoding",
+                "directory",
+                "logical_bytes",
+                "allocated_attributed_bytes",
+                "files",
+                "directories",
+                "complete",
+                "error",
+                "engine",
+                "scan_complete",
+                "spreadsheet_escaped",
+            ])
+            .map_err(|e| e.to_string())?;
+        let encoding = if cfg!(windows) { "utf16" } else { "bytes" };
+        for (id, node) in self.nodes.iter().enumerate() {
+            let path = self.path(id as u32);
+            let path_display = path.to_string_lossy();
+            let name_display = node.name.to_string_lossy();
+            let (safe_path, path_escaped) = spreadsheet_safe(&path_display);
+            let (safe_name, name_escaped) = spreadsheet_safe(&name_display);
+            let (safe_error, error_escaped) = spreadsheet_safe(node.error.as_deref().unwrap_or(""));
+            let path_units =
+                serde_json::to_string(&raw_units(path.as_os_str())).map_err(|e| e.to_string())?;
+            let name_units =
+                serde_json::to_string(&raw_units(&node.name)).map_err(|e| e.to_string())?;
+            let fields = [
+                id.to_string(),
+                if id == 0 {
+                    String::new()
+                } else {
+                    node.parent.to_string()
+                },
+                safe_path.into_owned(),
+                safe_name.into_owned(),
+                path_units,
+                name_units,
+                encoding.into(),
+                node.is_dir.to_string(),
+                node.logical.to_string(),
+                node.allocated.to_string(),
+                node.files.to_string(),
+                node.directories.to_string(),
+                node.complete.to_string(),
+                safe_error.into_owned(),
+                self.engine.into(),
+                self.nodes[0].complete.to_string(),
+                (path_escaped || name_escaped || error_escaped).to_string(),
+            ];
+            writer.write_record(&fields).map_err(|e| e.to_string())?;
+        }
+        writer.flush().map_err(|e| e.to_string())
+    }
     pub fn write_jsonl(&self, out: &mut impl std::io::Write) -> Result<(), String> {
         use serde_json::json;
         writeln!(out, "{}", json!({"type":"tree","root":self.root.to_string_lossy(),"root_units":raw_units(self.root.as_os_str()),"name_encoding":if cfg!(windows) {"utf16"} else {"bytes"},"entries":self.nodes.len(),"engine":self.engine,"fallback_reason":self.fallback_reason,"complete":self.nodes[0].complete,"logical_bytes":self.nodes[0].logical,"allocated_bytes":self.nodes[0].allocated})).map_err(|e|e.to_string())?;
@@ -318,13 +408,7 @@ impl Snapshot {
         out.flush().map_err(|e| e.to_string())
     }
 }
-pub fn save_tree(
-    path: &Path,
-    output: &Path,
-    threads: u8,
-    engine: crate::ScanEngine,
-) -> Result<serde_json::Value, String> {
-    let root = fs::canonicalize(path).map_err(|e| e.to_string())?;
+fn export_destination(root: &Path, output: &Path) -> Result<PathBuf, String> {
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -332,28 +416,77 @@ pub fn save_tree(
     let destination = fs::canonicalize(parent)
         .map_err(|e| e.to_string())?
         .join(output.file_name().ok_or("invalid output path")?);
-    if destination.starts_with(&root) {
+    if destination.starts_with(root) {
         return Err("tree output cannot be inside the scanned directory".into());
     }
     if fs::symlink_metadata(&destination).is_ok() {
         return Err("tree output already exists".into());
     }
-    let (stop, progress) = new_controls();
-    let snapshot = crate::scan_full_tree(path, threads, engine, &stop, &progress)?;
+    Ok(destination)
+}
+pub fn export_snapshot(
+    snapshot: &Snapshot,
+    output: &Path,
+    format: ExportFormat,
+) -> Result<serde_json::Value, String> {
+    let destination = export_destination(&snapshot.root, output)?;
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&destination)
         .map_err(|e| e.to_string())?;
-    snapshot.write_jsonl(&mut file)?;
+    snapshot.write_export(&mut file, format).map_err(|e| {
+        format!(
+            "export failed; partial file may remain at {}: {e}",
+            destination.display()
+        )
+    })?;
     Ok(
-        serde_json::json!({"output":destination.to_string_lossy(),"output_path":crate::native_path::value(&destination),"entries":snapshot.nodes.len(),"engine":snapshot.engine,"fallback_reason":snapshot.fallback_reason,"complete":snapshot.nodes[0].complete,"logical_bytes":snapshot.nodes[0].logical,"allocated_bytes":snapshot.nodes[0].allocated}),
+        serde_json::json!({"output":destination.to_string_lossy(),"output_path":crate::native_path::value(&destination),"format":match format {ExportFormat::Jsonl=>"jsonl",ExportFormat::Csv=>"csv"},"entries":snapshot.nodes.len(),"engine":snapshot.engine,"fallback_reason":snapshot.fallback_reason,"complete":snapshot.nodes[0].complete,"logical_bytes":snapshot.nodes[0].logical,"allocated_bytes":snapshot.nodes[0].allocated}),
     )
+}
+pub fn save_tree(
+    path: &Path,
+    output: &Path,
+    threads: u8,
+    engine: crate::ScanEngine,
+    format: ExportFormat,
+) -> Result<serde_json::Value, String> {
+    let root = fs::canonicalize(path).map_err(|e| e.to_string())?;
+    let _ = export_destination(&root, output)?;
+    let (stop, progress) = new_controls();
+    let snapshot = crate::scan_full_tree(path, threads, engine, &stop, &progress)?;
+    export_snapshot(&snapshot, output, format)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn csv_sanitizes_formula_prefixes_and_reports_write_failures() {
+        for text in ["=1+1", "  +cmd", "\ttext", "@formula", "-123"] {
+            assert!(spreadsheet_safe(text).1, "{text:?}");
+        }
+        assert!(!spreadsheet_safe("ordinary.txt").1);
+        struct Fails;
+        impl std::io::Write for Fails {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("fixture failure"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut root = Node::new(OsString::new(), NONE);
+        root.is_dir = true;
+        let tree = Snapshot {
+            root: PathBuf::from("root"),
+            nodes: vec![root],
+            engine: "filesystem_walk",
+            fallback_reason: None,
+        };
+        assert!(tree.write_csv(&mut Fails).is_err());
+    }
     #[test]
     fn jsonl_preserves_raw_name_units() {
         #[cfg(windows)]

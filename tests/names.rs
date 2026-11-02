@@ -95,6 +95,25 @@ fn raw_names_round_trip_through_plan_and_confirmed_mcp_cleanup() {
             .as_array()
             .is_some_and(|a| a.iter().any(|v| v.as_u64() == Some(unit)))
     }));
+    let csv = Command::new(exe)
+        .arg("tree")
+        .arg(&base)
+        .args(["--format", "csv"])
+        .output()
+        .unwrap();
+    assert!(
+        csv.status.success(),
+        "{}",
+        String::from_utf8_lossy(&csv.stderr)
+    );
+    let mut csv_reader = csv::Reader::from_reader(csv.stdout.as_slice());
+    let header = csv_reader.headers().unwrap().clone();
+    let name_units_index = header.iter().position(|name| name == "name_units").unwrap();
+    assert!(csv_reader.records().map(Result::unwrap).any(|record| {
+        serde_json::from_str::<Vec<u32>>(&record[name_units_index])
+            .unwrap()
+            .contains(&(unit as u32))
+    }));
     let root_scan = Command::new(exe)
         .arg("scan")
         .arg(&target)
