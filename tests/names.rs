@@ -25,7 +25,17 @@ fn raw_names_are_preserved_and_unserializable_plans_are_rejected() {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let target = base.join(&name);
-    fs::create_dir_all(&target).unwrap();
+    if let Err(error) = fs::create_dir_all(&target) {
+        #[cfg(target_os = "macos")]
+        if error.raw_os_error() == Some(libc::EILSEQ) {
+            eprintln!(
+                "filesystem rejects non-UTF-8 names; native-name behavior remains covered by synthetic index tests"
+            );
+            fs::remove_dir_all(&base).unwrap();
+            return;
+        }
+        panic!("failed to create native-name fixture: {error}");
+    }
     fs::write(target.join("file"), b"hello").unwrap();
     let exe = env!("CARGO_BIN_EXE_filetree233");
     let out = Command::new(exe)
