@@ -439,26 +439,61 @@ fn export_destination(root: &Path, output: &Path) -> Result<PathBuf, String> {
     }
     Ok(destination)
 }
-pub fn export_snapshot(
+struct CancelWriter<'a, W> {
+    inner: W,
+    cancelled: &'a AtomicBool,
+}
+impl<W: std::io::Write> std::io::Write for CancelWriter<'_, W> {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(std::io::Error::other("export cancelled"));
+        }
+        self.inner.write(data)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(std::io::Error::other("export cancelled"));
+        }
+        self.inner.flush()
+    }
+}
+fn export_snapshot_controlled(
     snapshot: &Snapshot,
     output: &Path,
     format: ExportFormat,
+    cancelled: &AtomicBool,
 ) -> Result<serde_json::Value, String> {
     let destination = export_destination(&snapshot.root, output)?;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&destination)
-        .map_err(|e| e.to_string())?;
-    snapshot.write_export(&mut file, format).map_err(|e| {
-        format!(
-            "export failed; partial file may remain at {}: {e}",
-            destination.display()
-        )
+    publish_export(&destination, cancelled, |writer| {
+        snapshot.write_export(writer, format)
     })?;
     Ok(
         serde_json::json!({"output":destination.to_string_lossy(),"output_path":crate::native_path::value(&destination),"format":match format {ExportFormat::Jsonl=>"jsonl",ExportFormat::Csv=>"csv"},"entries":snapshot.nodes.len(),"engine":snapshot.engine,"fallback_reason":snapshot.fallback_reason,"complete":snapshot.nodes[0].complete,"logical_bytes":snapshot.nodes[0].logical,"allocated_bytes":snapshot.nodes[0].allocated}),
     )
+}
+fn publish_export(
+    destination: &Path,
+    cancelled: &AtomicBool,
+    write: impl FnOnce(&mut CancelWriter<'_, &mut tempfile::NamedTempFile>) -> Result<(), String>,
+) -> Result<(), String> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("export cancelled".into());
+    }
+    // Stage beside the destination; failed or cancelled exports are removed on drop.
+    let mut file = tempfile::Builder::new()
+        .prefix(".filetree233-")
+        .tempfile_in(destination.parent().ok_or("invalid output parent")?)
+        .map_err(|e| e.to_string())?;
+    write(&mut CancelWriter {
+        inner: &mut file,
+        cancelled,
+    })?;
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("export cancelled".into());
+    }
+    file.persist_noclobber(destination)
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 pub fn save_tree(
     path: &Path,
@@ -467,16 +502,55 @@ pub fn save_tree(
     engine: crate::ScanEngine,
     format: ExportFormat,
 ) -> Result<serde_json::Value, String> {
+    let (stop, progress) = new_controls();
+    save_tree_controlled(path, output, threads, engine, format, &stop, &progress)
+}
+pub fn save_tree_controlled(
+    path: &Path,
+    output: &Path,
+    threads: u8,
+    engine: crate::ScanEngine,
+    format: ExportFormat,
+    stop: &AtomicBool,
+    progress: &AtomicU64,
+) -> Result<serde_json::Value, String> {
+    if stop.load(Ordering::Relaxed) {
+        return Err("scan cancelled".into());
+    }
     let root = fs::canonicalize(path).map_err(|e| e.to_string())?;
     let _ = export_destination(&root, output)?;
-    let (stop, progress) = new_controls();
-    let snapshot = crate::scan_full_tree(path, threads, engine, &stop, &progress)?;
-    export_snapshot(&snapshot, output, format)
+    let snapshot = crate::scan_full_tree(path, threads, engine, stop, progress)?;
+    export_snapshot_controlled(&snapshot, output, format, stop)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cancelled_or_failed_export_never_publishes_partial_file() {
+        use std::io::Write;
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("tree.jsonl");
+        let stop = AtomicBool::new(false);
+        let result = publish_export(&destination, &stop, |writer| {
+            writer.write_all(b"partial").map_err(|e| e.to_string())?;
+            stop.store(true, Ordering::Relaxed);
+            writer.write_all(b"remaining").map_err(|e| e.to_string())
+        });
+        assert!(result.is_err());
+        assert!(!destination.exists());
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+        stop.store(false, Ordering::Relaxed);
+        fs::write(&destination, b"existing").unwrap();
+        assert!(
+            publish_export(&destination, &stop, |writer| writer
+                .write_all(b"new")
+                .map_err(|e| e.to_string()))
+            .is_err()
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"existing");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
     #[test]
     fn csv_sanitizes_formula_prefixes_and_reports_write_failures() {
         for text in ["=1+1", "  +cmd", "\ttext", "@formula", "-123"] {

@@ -833,12 +833,15 @@ fn serve() -> Result<(), String> {
             "tools/call" => {
                 let args = &req["params"]["arguments"];
                 let name = req["params"]["name"].as_str().unwrap_or("");
-                if active.is_some() && matches!(name, "tree" | "benchmark" | "plan" | "apply") {
+                if active.is_some() && matches!(name, "benchmark" | "plan" | "apply") {
                     tool_result(
                         id,
                         Err("another analysis is running; retry after it finishes".into()),
                     )
-                } else if matches!(name, "scan" | "search" | "recommend" | "duplicates") {
+                } else if matches!(
+                    name,
+                    "scan" | "tree" | "search" | "recommend" | "duplicates"
+                ) {
                     if active.is_some() || pending.is_some() {
                         tool_result(
                             id,
@@ -894,7 +897,6 @@ fn serve() -> Result<(), String> {
                         "volumes" => volumes::list_json(),
                         "capacity" => (|| { let path=native_path::from_value(&args["path"])?; volumes::capacity(&path) })(),
                         "benchmark" => (|| { let path=native_path::from_value(&args["path"])?; let n=|key: &str, default: u8| -> Result<u8, &str> { match args.get(key) { None => Ok(default), Some(v) => u8::try_from(v.as_u64().ok_or("invalid numeric argument")?).map_err(|_| "invalid numeric argument") } }; let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; benchmark::run(&path, n("threads",4)?, engine, n("iterations",3)?) })(),
-                        "tree" => (|| { let path = native_path::from_value(&args["path"])?; let output = native_path::from_value(&args["output"])?; let threads = if args.get("threads").is_some() { u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")? } else { 4 }; { let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; { let format=match args.get("format").and_then(Value::as_str) {None if args.get("format").is_none()=>tree::ExportFormat::Jsonl,Some("jsonl")=>tree::ExportFormat::Jsonl,Some("csv")=>tree::ExportFormat::Csv,_=>return Err("invalid export format".into())}; tree::save_tree(&path, &output, threads, engine, format) } } })(),
                         "plan" => (|| { let paths = args["paths"].as_array().ok_or("paths required")?.iter().map(native_path::from_value).collect::<Result<Vec<_>,_>>()?; let out = native_path::from_value(&args["output"])?; { let mode = match args.get("mode") { None => CleanupMode::Recycle, Some(Value::String(name)) if name == "recycle" => CleanupMode::Recycle, Some(Value::String(name)) if name == "permanent" => CleanupMode::Permanent, _ => return Err("invalid cleanup mode".into()) }; save_plan_mode(&paths, &out, mode) } })(),
                         "apply" => Err("client must support human elicitation, and only one confirmation can be pending".into()),
                         _ => Err("unknown tool".into())

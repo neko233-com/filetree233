@@ -13,6 +13,7 @@ ntfs-mft = "0.1.0"
 sysinfo = { version = "0.40.1", default-features = false, features = ["disk"] }
 globset = "0.4"
 csv = "1"
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }

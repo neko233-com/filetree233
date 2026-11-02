@@ -29,6 +29,16 @@ pub fn run(
     };
     match name {
         "scan" => scan_dispatch_controlled(&path, threads, engine, stop),
+        "tree" => {
+            let output = native_path::from_value(&args["output"])?;
+            let format = match args.get("format") {
+                None => tree::ExportFormat::Jsonl,
+                Some(Value::String(s)) if s == "jsonl" => tree::ExportFormat::Jsonl,
+                Some(Value::String(s)) if s == "csv" => tree::ExportFormat::Csv,
+                _ => return Err("invalid export format".into()),
+            };
+            tree::save_tree_controlled(&path, &output, threads, engine, format, stop, progress)
+        }
         "search" => {
             let flag = |key: &str| -> Result<bool, &str> {
                 match args.get(key) {

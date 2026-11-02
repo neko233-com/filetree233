@@ -156,9 +156,10 @@ fn cancelled_analysis_keeps_server_responsive_and_releases_slot() {
         .unwrap();
     let mut input = proc.stdin.take().unwrap();
     let mut output = BufReader::new(proc.stdout.take().unwrap());
-    for name in ["scan", "search", "recommend", "duplicates"] {
+    let export_path = root.with_extension("jsonl");
+    for name in ["scan", "tree", "search", "recommend", "duplicates"] {
         for message in [
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{"path":root,"query":"file","threads":1}}}),
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{"path":root,"output":export_path,"query":"file","threads":1}}}),
             json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}),
             json!({"jsonrpc":"2.0","id":2,"method":"ping"}),
         ] {
@@ -188,6 +189,7 @@ fn cancelled_analysis_keeps_server_responsive_and_releases_slot() {
     drop(input);
     assert!(proc.wait().unwrap().success());
     assert!(root.join("file-00000").exists());
+    assert!(!export_path.exists());
     fs::remove_dir_all(root).unwrap();
 }
 
