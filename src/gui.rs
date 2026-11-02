@@ -166,11 +166,14 @@ impl App {
         self.plan_data = None;
         self.rx = Some(rx);
         thread::spawn(move || {
-            let result = if tree_enabled {
-                crate::tree::scan(&path, threads, &cancelled, &progress).map(ScanResult::Tree)
-            } else {
-                scan_dispatch(&path, threads, engine).map(ScanResult::Summary)
-            };
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if tree_enabled {
+                    crate::tree::scan(&path, threads, &cancelled, &progress).map(ScanResult::Tree)
+                } else {
+                    scan_dispatch(&path, threads, engine).map(ScanResult::Summary)
+                }
+            }))
+            .unwrap_or_else(|_| Err("scan worker failed unexpectedly".into()));
             let _ = tx.send(result);
             ctx.request_repaint();
         });

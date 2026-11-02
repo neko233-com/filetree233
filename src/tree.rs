@@ -345,6 +345,39 @@ pub fn save_tree(path: &Path, output: &Path, threads: u8) -> Result<serde_json::
 mod tests {
     use super::*;
     #[test]
+    fn jsonl_preserves_raw_name_units() {
+        #[cfg(windows)]
+        let name = {
+            use std::os::windows::ffi::OsStringExt;
+            OsString::from_wide(&[0xd800, b'x' as u16])
+        };
+        #[cfg(unix)]
+        let name = {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(vec![0xff, b'x'])
+        };
+        #[cfg(not(any(windows, unix)))]
+        let name = OsString::from("x");
+        let mut root = Node::new(OsString::new(), NONE);
+        root.is_dir = true;
+        root.first_child = 1;
+        let tree = Snapshot {
+            root: PathBuf::from("root"),
+            nodes: vec![root, Node::new(name, 0)],
+        };
+        let mut output = Vec::new();
+        tree.write_jsonl(&mut output).unwrap();
+        let rows: Vec<serde_json::Value> = output
+            .split(|b| *b == b'\n')
+            .filter(|x| !x.is_empty())
+            .map(|x| serde_json::from_slice(x).unwrap())
+            .collect();
+        #[cfg(windows)]
+        assert_eq!(rows[2]["name_units"], serde_json::json!([0xd800, 120]));
+        #[cfg(unix)]
+        assert_eq!(rows[2]["name_units"], serde_json::json!([255, 120]));
+    }
+    #[test]
     fn snapshot_keeps_tree_and_aggregates_hard_links() {
         let root = std::env::temp_dir().join(format!(
             "filetree233-tree-{}-{}",
