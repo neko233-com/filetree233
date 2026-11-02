@@ -1,5 +1,11 @@
 name: Verify published installers
 on:
+  workflow_call:
+    inputs:
+      version:
+        description: Release tag to install
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       version:

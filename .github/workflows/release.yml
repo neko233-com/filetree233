@@ -58,6 +58,10 @@ jobs:
           FILETREE233_TEST_FAST_ONLY: '1'
         run: cargo test --release --locked --target ${{ matrix.target }} --test mft_live -- --nocapture
       - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Verify installers with the actual release executable
+        env:
+          FILETREE233_INSTALL_TEST_BINARY: target/${{ matrix.target }}/release/${{ matrix.exe }}
+        run: cargo test --release --locked --target ${{ matrix.target }} --test installer -- --ignored --nocapture
       - shell: bash
         run: |
           "target/${{ matrix.target }}/release/${{ matrix.exe }}" --version
@@ -92,3 +96,9 @@ jobs:
           body_path: RELEASE_NOTES.md
           files: artifacts/*
           fail_on_unmatched_files: true
+  verify_installed:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: publish
+    uses: ./.github/workflows/install-check.yml
+    with:
+      version: ${{ github.ref_name }}

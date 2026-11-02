@@ -61,6 +61,10 @@ Linux / macOS：
 curl -fsSL https://raw.githubusercontent.com/neko233-com/filetree233/v0.1.0-alpha.1/scripts/install.sh | sh
 ```
 
+安装器也支持通过 `FILETREE233_RELEASE_BASE` 指定 HTTPS Release 下载镜像（路径应对应 GitHub 的 `releases/download`）。校验文件与程序来自同一下载源，使用镜像时应确认该源可信。安装前校验 SHA-256，并在目标目录暂存后替换已有程序。
+
+发布构建会在六个平台对当前产物执行本地 HTTP 安装、重复安装及错误校验测试；标签发布后还会自动运行六平台的 GitHub Release 实际下载与安装验证。
+
 Windows 默认安装至 `%LOCALAPPDATA%\Programs\filetree233`；Linux/macOS 默认安装至 `~/.local/bin`，可通过 `FILETREE233_INSTALL_DIR` 修改目录，或通过 `FILETREE233_VERSION` 选择版本。Windows 脚本参数 `-InstallDir`、`-Version` 可用于本地脚本。发布工作流并行构建六种平台；标签触发发布，版本及限制记录在 [CHANGELOG.md](CHANGELOG.md)。Linux 需要系统图形和 OpenGL 运行环境；macOS 构建未签名公证。具体平台的实际可用性以发布和验收结果为准。
 
 ## MCP
