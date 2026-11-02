@@ -265,6 +265,7 @@ fn equal_content(
     a: &Candidate,
     b: &Candidate,
     size: u64,
+    expected_hash: &[u8; 32],
     cancelled: &AtomicBool,
 ) -> Result<bool, String> {
     let (mut af, astamp, aid, achange) = open_checked(&a.path, size)?;
@@ -281,6 +282,7 @@ fn equal_content(
     let mut ab = vec![0u8; CHUNK];
     let mut bb = vec![0u8; CHUNK];
     let mut equal = true;
+    let mut actual_hash = Sha256::new();
     let mut remaining = size;
     while remaining > 0 {
         if cancelled.load(Ordering::Relaxed) {
@@ -293,10 +295,14 @@ fn equal_content(
             equal = false;
             break;
         }
+        actual_hash.update(&ab[..count]);
         remaining -= count as u64;
     }
     verify_stamp(&a.path, &af, astamp, aid, achange)?;
     verify_stamp(&b.path, &bf, bstamp, bid, bchange)?;
+    if equal && actual_hash.finalize().as_slice() != expected_hash {
+        return Err("file content changed since hashing".into());
+    }
     Ok(equal)
 }
 fn hash_jobs(
@@ -468,7 +474,13 @@ pub fn find(
             let mut matched = false;
             let mut failed = false;
             for cluster in &mut clusters {
-                match equal_content(&candidates[cluster[0]], &candidates[id], size, cancelled) {
+                match equal_content(
+                    &candidates[cluster[0]],
+                    &candidates[id],
+                    size,
+                    &hash,
+                    cancelled,
+                ) {
                     Ok(true) => {
                         cluster.push(id);
                         matched = true;
@@ -554,6 +566,39 @@ impl Report {
 mod tests {
     use super::*;
     #[test]
+    fn byte_comparison_rechecks_original_hash() {
+        let root = std::env::temp_dir().join(format!(
+            "filetree233-duplicates-hash-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let make = |name: &str| {
+            let path = root.join(name);
+            fs::write(&path, b"modified").unwrap();
+            let (_, stamp, identity, change) = open_checked(&path, 8).unwrap();
+            Candidate {
+                path,
+                aliases: Vec::new(),
+                size: 8,
+                stamp,
+                identity,
+                change,
+            }
+        };
+        let a = make("a");
+        let b = make("b");
+        let stop = AtomicBool::new(false);
+        let old_hash: [u8; 32] = Sha256::digest(b"original").into();
+        let new_hash: [u8; 32] = Sha256::digest(b"modified").into();
+        assert!(equal_content(&a, &b, 8, &old_hash, &stop).is_err());
+        assert!(equal_content(&a, &b, 8, &new_hash, &stop).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn in_place_change_with_restored_mtime_is_rejected() {
         let root = std::env::temp_dir().join(format!(
             "filetree233-duplicates-modified-{}-{}",
@@ -582,9 +627,12 @@ mod tests {
             stamp(&fs::metadata(&path).unwrap()).unwrap().modified,
             before.modified
         );
-        assert!(verify_stamp(&path, &file, before, identity, change).is_err());
-        assert!(digest(&candidate, false, &AtomicBool::new(false)).is_err());
-        assert!(revalidate_candidate_path(&candidate, &path).is_err());
+        // Some filesystems may report the same change time for rapid writes.
+        if change_version(&file).unwrap() != change {
+            assert!(verify_stamp(&path, &file, before, identity, change).is_err());
+            assert!(digest(&candidate, false, &AtomicBool::new(false)).is_err());
+            assert!(revalidate_candidate_path(&candidate, &path).is_err());
+        }
         drop(file);
         fs::remove_dir_all(root).unwrap();
     }
