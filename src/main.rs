@@ -400,14 +400,23 @@ fn scan_dispatch(path: &Path, threads: u8, engine: ScanEngine) -> Result<Value, 
     match engine {
         ScanEngine::Walk => scan_with_threads(path, threads),
         ScanEngine::Mft => mft::scan_tree(path),
-        ScanEngine::Auto => match mft::scan_tree(path) {
-            Ok(result) => Ok(result),
-            Err(reason) => {
-                let mut result = scan_with_threads(path, threads)?;
-                result["fallback_reason"] = json!(reason);
-                Ok(result)
+        ScanEngine::Auto => {
+            let root = fs::canonicalize(path).map_err(err)?;
+            if root.parent().is_some() {
+                let mut result = scan_with_threads(&root, threads)?;
+                result["fallback_reason"] =
+                    json!("auto selects filesystem traversal for subdirectories");
+                return Ok(result);
             }
-        },
+            match mft::scan_tree(&root) {
+                Ok(result) => Ok(result),
+                Err(reason) => {
+                    let mut result = scan_with_threads(&root, threads)?;
+                    result["fallback_reason"] = json!(reason);
+                    Ok(result)
+                }
+            }
+        }
     }
 }
 fn make_plan(paths: &[PathBuf], output: &Path) -> Result<Plan, String> {
@@ -864,9 +873,8 @@ mod tests {
             serial["total_allocated_bytes"]
         );
     }
-    #[cfg(not(windows))]
     #[test]
-    fn automatic_engine_reports_fallback_on_unsupported_platform() {
+    fn automatic_engine_uses_walk_for_subdirectory() {
         let f = Fixture::new();
         fs::write(f.0.join("demo"), b"test").unwrap();
         let result = scan_dispatch(&f.0, 2, ScanEngine::Auto).unwrap();
@@ -875,7 +883,7 @@ mod tests {
             result["fallback_reason"]
                 .as_str()
                 .unwrap()
-                .contains("Windows only")
+                .contains("subdirectories")
         );
         assert_eq!(result["entries"][0]["bytes"], 4);
     }
