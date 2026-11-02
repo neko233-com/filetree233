@@ -139,6 +139,117 @@ pub fn inspect_volume_stdout(path: &Path, name: Option<&str>, fast: bool) -> Res
 pub fn inspect_stdout(path: &Path, record_size: usize, used_only: bool) -> Result<(), String> {
     inspect(path, record_size, used_only, &mut io::stdout().lock())
 }
+#[cfg(windows)]
+pub fn scan_tree(path: &Path) -> Result<serde_json::Value, String> {
+    use crate::mft_index::{Directory, Index, Link};
+    use ntfs_mft::FileNameNamespace;
+    use std::{
+        ffi::OsString,
+        fs,
+        mem::zeroed,
+        os::windows::{
+            ffi::{OsStrExt, OsStringExt},
+            fs::OpenOptionsExt,
+            io::AsRawHandle,
+        },
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        GetFileInformationByHandle, GetVolumePathNameW,
+    };
+    let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_dir() || crate::is_reparse(&meta) {
+        return Err("MFT scan requires a non-reparse directory".into());
+    }
+    let root = fs::canonicalize(path).map_err(|e| e.to_string())?;
+    let dir = fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&root)
+        .map_err(|e| e.to_string())?;
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
+    if unsafe { GetFileInformationByHandle(dir.as_raw_handle() as _, &mut info) } == 0 {
+        return Err(io::Error::last_os_error().to_string());
+    }
+    let root_id = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
+    let wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut mount = vec![0u16; 32768];
+    if unsafe { GetVolumePathNameW(wide.as_ptr(), mount.as_mut_ptr(), mount.len() as u32) } == 0 {
+        return Err(io::Error::last_os_error().to_string());
+    }
+    let n = mount
+        .iter()
+        .position(|c| *c == 0)
+        .ok_or("invalid mount path")?;
+    let mount = OsString::from_wide(&mount[..n]);
+    let volume =
+        ntfs_mft::Volume::from_mount_point(Path::new(&mount)).map_err(|e| e.to_string())?;
+    let raw = volume.raw_mft().map_err(|e| e.to_string())?;
+    let mut index = Index::new(root_id);
+    let mut root_found = root_id & 0x0000_ffff_ffff_ffff == 5;
+    for record in raw.scan_entries().map_err(|e| e.to_string())? {
+        let entry = record.map_err(|e| e.to_string())?;
+        if entry.file_reference.get() == root_id {
+            root_found = true;
+        }
+        if entry.is_directory
+            && entry.file_reference.get() != root_id
+            && let Ok(name) = String::from_utf16(entry.file_name.as_utf16())
+        {
+            index.add_directory(Directory {
+                id: entry.file_reference.get(),
+                parent: entry.parent_reference.get(),
+                name,
+                reparse: entry.is_reparse_point,
+            });
+        }
+    }
+    if !root_found {
+        return Err("target directory reference not found in MFT; use filesystem scan".into());
+    }
+    index.finish_directories();
+    for record in raw.scan_entries().map_err(|e| e.to_string())? {
+        let entry = record.map_err(|e| e.to_string())?;
+        if entry.is_directory || entry.is_reparse_point {
+            continue;
+        }
+        let mut links = Vec::new();
+        if entry.links.is_empty() {
+            if let Ok(name) = String::from_utf16(entry.file_name.as_utf16()) {
+                links.push(Link {
+                    parent: entry.parent_reference.get(),
+                    name,
+                });
+            }
+        } else {
+            for link in &entry.links {
+                if link.namespace == FileNameNamespace::Dos
+                    && entry.links.iter().any(|other| {
+                        other.parent_reference == link.parent_reference
+                            && other.namespace != FileNameNamespace::Dos
+                    })
+                {
+                    continue;
+                }
+                if let Ok(name) = String::from_utf16(link.file_name.as_utf16()) {
+                    links.push(Link {
+                        parent: link.parent_reference.get(),
+                        name,
+                    });
+                }
+            }
+        }
+        index.add_file(&links, entry.real_size, entry.allocated_size);
+    }
+    Ok(index.finish(&root))
+}
+#[cfg(not(windows))]
+pub fn scan_tree(_: &Path) -> Result<serde_json::Value, String> {
+    Err("MFT directory aggregation currently supports Windows only".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

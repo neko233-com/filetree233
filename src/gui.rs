@@ -1,4 +1,6 @@
-use crate::{delete_checked, plan_description, read_checked_plan, save_plan, scan_with_threads};
+use crate::{
+    ScanEngine, delete_checked, plan_description, read_checked_plan, save_plan, scan_dispatch,
+};
 use eframe::egui::{self, Color32, RichText, Sense, Vec2};
 use std::{
     path::PathBuf,
@@ -58,6 +60,7 @@ struct App {
     path: String,
     filter: String,
     threads: u8,
+    engine: ScanEngine,
     entries: Vec<serde_json::Value>,
     selected: Vec<PathBuf>,
     status: String,
@@ -77,6 +80,7 @@ impl Default for App {
                 .to_string(),
             filter: String::new(),
             threads: 4,
+            engine: ScanEngine::Walk,
             entries: vec![],
             selected: vec![],
             status: "Choose a directory and scan. Sizes are logical bytes.".into(),
@@ -99,6 +103,7 @@ impl App {
         }
         let path = PathBuf::from(&self.path);
         let threads = self.threads;
+        let engine = self.engine;
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         self.status = "Scanning...".into();
@@ -107,7 +112,7 @@ impl App {
         self.plan_data = None;
         self.rx = Some(rx);
         thread::spawn(move || {
-            let _ = tx.send(scan_with_threads(&path, threads));
+            let _ = tx.send(scan_dispatch(&path, threads, engine));
             ctx.request_repaint();
         });
     }
@@ -121,7 +126,8 @@ impl eframe::App for App {
                 Ok(v) => {
                     self.entries = v["entries"].as_array().cloned().unwrap_or_default();
                     self.status = format!(
-                        "{} entries. Attributed allocation: {} bytes{}",
+                        "{}: {} entries. Attributed allocation: {} bytes{}",
+                        v["engine"].as_str().unwrap_or("unknown"),
                         self.entries.len(),
                         v["total_allocated_bytes"].as_u64().unwrap_or(0),
                         if v["complete"] == false {
@@ -130,6 +136,9 @@ impl eframe::App for App {
                             ""
                         }
                     );
+                    if let Some(reason) = v["fallback_reason"].as_str() {
+                        self.status.push_str(&format!("; fallback: {reason}"));
+                    }
                 }
                 Err(e) => self.status = e,
             }
@@ -151,6 +160,21 @@ impl eframe::App for App {
                 }
             });
             ui.horizontal(|ui| {
+                egui::ComboBox::from_label("Engine")
+                    .selected_text(format!("{:?}", self.engine))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.engine, ScanEngine::Walk, "Walk");
+                        ui.selectable_value(
+                            &mut self.engine,
+                            ScanEngine::Mft,
+                            "MFT (experimental)",
+                        );
+                        ui.selectable_value(
+                            &mut self.engine,
+                            ScanEngine::Auto,
+                            "Auto (experimental)",
+                        );
+                    });
                 ui.label("Workers");
                 ui.add(egui::DragValue::new(&mut self.threads).range(1..=32));
                 ui.label("Filter");
