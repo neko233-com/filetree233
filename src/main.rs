@@ -1,5 +1,6 @@
 mod allocation;
 mod gui;
+mod mft;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -28,6 +29,16 @@ enum Command {
         /// Parallel top-level workers (1-32).
         #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=32))]
         threads: u8,
+    },
+    /// Inspect an exported logical NTFS MFT stream as JSON Lines.
+    MftInspect {
+        path: PathBuf,
+        /// Source volume MFT record size; no automatic geometry guessing.
+        #[arg(long)]
+        record_size: usize,
+        /// Omit records not marked in use (invalid slots are still reported).
+        #[arg(long)]
+        used_only: bool,
     },
     /// Create a cleanup plan for explicitly selected files and directories.
     Plan {
@@ -643,6 +654,7 @@ fn main() {
             }
             Ok(())
         }),
+        Command::MftInspect { path, record_size, used_only } => mft::inspect_stdout(&path, record_size, used_only),
         Command::Plan { paths, output } => save_plan(&paths, &output)
             .map(|v| println!("{}", serde_json::to_string_pretty(&v).unwrap())),
         Command::Apply { plan } => apply(&plan),

@@ -157,3 +157,38 @@ fn small_demo_scan_and_cleanup_plan_safety() {
     assert!(target.join("a.bin").exists());
     assert!(demo.0.join("outside/keep").exists());
 }
+
+#[test]
+fn cli_inspects_invalid_mft_slot_without_panicking() {
+    let root = std::env::temp_dir().join(format!(
+        "filetree233-mft-cli-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let file = root.join("empty.mft");
+    fs::write(&file, [0u8; 1024]).unwrap();
+    let out = run(&[
+        "mft-inspect".as_ref(),
+        text(&file),
+        "--record-size".as_ref(),
+        "1024".as_ref(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rows: Vec<Value> = out
+        .stdout
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["type"], "invalid_record");
+    assert_eq!(rows[1]["invalid_records"], 1);
+    assert_eq!(rows[1]["complete"], false);
+    fs::remove_file(file).unwrap();
+    fs::remove_dir(root).unwrap();
+}
