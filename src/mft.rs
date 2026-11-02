@@ -34,8 +34,12 @@ pub fn inspect_volume(path: &Path, name: Option<&str>, out: &mut impl Write) -> 
     let options = MftStreamOptions::new(raw.file_record_size())
         .map_err(|e| e.to_string())?
         .resolve_extensions(true);
-    let mut stream = MftStream::from_reader(raw.byte_reader().map_err(|e| e.to_string())?, options)
-        .map_err(|e| e.to_string())?;
+    // Batch sequential records while keeping the read buffer bounded.
+    let reader = std::io::BufReader::with_capacity(
+        1024 * 1024,
+        raw.byte_reader().map_err(|e| e.to_string())?,
+    );
+    let mut stream = MftStream::from_reader(reader, options).map_err(|e| e.to_string())?;
     inspect_stream(
         &mut stream,
         true,
@@ -163,6 +167,59 @@ mod tests {
         record[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         record[24..28].copy_from_slice(&((offset + 8) as u32).to_le_bytes());
         record
+    }
+    #[test]
+    fn live_stream_filter_does_not_emit_unmatched_or_invalid_records() {
+        let mut bytes = Vec::new();
+        bytes.extend(named_record());
+        bytes.extend(synthetic_record(true));
+        bytes.extend([0u8; 1024]);
+        let mut stream = MftStream::from_reader(
+            std::io::Cursor::new(bytes),
+            MftStreamOptions::new(1024).unwrap(),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        inspect_stream(&mut stream, true, Some("雪"), true, "test", &mut out).unwrap();
+        let rows: Vec<serde_json::Value> = out
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["name"], "demo-雪.txt");
+        assert_eq!(rows[1]["parsed_records"], 2);
+        assert_eq!(rows[1]["invalid_records"], 1);
+        assert_eq!(rows[1]["displayed_records"], 1);
+    }
+    #[test]
+    fn stream_io_error_stops_scan_without_success_summary() {
+        struct Failing(std::io::Cursor<Vec<u8>>);
+        impl std::io::Read for Failing {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.position() >= 1024 {
+                    return Err(std::io::Error::other("injected read failure"));
+                }
+                self.0.read(buf)
+            }
+        }
+        impl std::io::Seek for Failing {
+            fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+                self.0.seek(pos)
+            }
+        }
+        let mut bytes = Vec::new();
+        bytes.extend(named_record());
+        bytes.extend(synthetic_record(true));
+        let mut stream = MftStream::from_reader(
+            Failing(std::io::Cursor::new(bytes)),
+            MftStreamOptions::new(1024).unwrap(),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        let error = inspect_stream(&mut stream, false, None, false, "test", &mut out).unwrap_err();
+        assert!(error.contains("injected read failure"));
+        assert!(!String::from_utf8(out).unwrap().contains("summary"));
     }
     #[test]
     fn exported_mft_preserves_name_size_and_named_streams() {
