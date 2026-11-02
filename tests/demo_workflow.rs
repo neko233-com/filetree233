@@ -131,6 +131,35 @@ fn small_demo_scan_and_cleanup_plan_safety() {
                 .unwrap(),
         allocated_one
     );
+    let tree_out = run(&["tree".as_ref(), text(&safe)]);
+    assert!(
+        tree_out.status.success(),
+        "tree: {}",
+        String::from_utf8_lossy(&tree_out.stderr)
+    );
+    let tree_rows: Vec<Value> = tree_out
+        .stdout
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    assert_eq!(tree_rows[0]["type"], "tree");
+    assert_eq!(tree_rows[0]["complete"], false);
+    assert!(
+        tree_rows
+            .iter()
+            .any(|row| row["name"] == "中文.txt" && row["logical_bytes"] == 5)
+    );
+    assert!(
+        tree_rows
+            .iter()
+            .any(|row| row["name"] == "link" && row["complete"] == false)
+    );
+    assert!(
+        tree_rows
+            .iter()
+            .any(|row| row["name"] == "a.bin" && row["logical_bytes"] == 32768)
+    );
     let rejected_plan = demo.0.join("rejected-plan.json");
     let rejected = run(&[
         "plan".as_ref(),

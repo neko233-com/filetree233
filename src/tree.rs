@@ -1,0 +1,409 @@
+//! Compact, in-memory filesystem tree for interactive navigation.
+use crate::{allocation, is_reparse};
+use std::{
+    collections::HashSet,
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+};
+const NONE: u32 = u32::MAX;
+
+#[derive(Debug)]
+pub struct Node {
+    pub name: OsString,
+    pub parent: u32,
+    pub first_child: u32,
+    pub next_sibling: u32,
+    pub logical: u64,
+    pub allocated: u64,
+    pub files: u64,
+    pub directories: u64,
+    pub is_dir: bool,
+    pub error: Option<String>,
+    pub complete: bool,
+}
+impl Node {
+    fn new(name: OsString, parent: u32) -> Self {
+        Self {
+            name,
+            parent,
+            first_child: NONE,
+            next_sibling: NONE,
+            logical: 0,
+            allocated: 0,
+            files: 0,
+            directories: 0,
+            is_dir: false,
+            error: None,
+            complete: true,
+        }
+    }
+}
+#[derive(Debug)]
+pub struct Snapshot {
+    pub root: PathBuf,
+    pub nodes: Vec<Node>,
+}
+impl Snapshot {
+    pub fn path(&self, id: u32) -> PathBuf {
+        let mut parts = Vec::new();
+        let mut cursor = id;
+        while cursor != 0 {
+            let n = &self.nodes[cursor as usize];
+            parts.push(n.name.as_os_str());
+            cursor = n.parent;
+        }
+        let mut path = self.root.clone();
+        for part in parts.into_iter().rev() {
+            path.push(part);
+        }
+        path
+    }
+    pub fn child_ids(&self, id: u32) -> impl Iterator<Item = u32> + '_ {
+        let first = self.nodes[id as usize].first_child;
+        std::iter::successors((first != NONE).then_some(first), move |id| {
+            let next = self.nodes[*id as usize].next_sibling;
+            (next != NONE).then_some(next)
+        })
+    }
+    pub fn children(&self, id: u32) -> Vec<u32> {
+        self.child_ids(id).collect()
+    }
+    pub fn parent(&self, id: u32) -> Option<u32> {
+        (id != 0).then(|| self.nodes[id as usize].parent)
+    }
+}
+struct Queue {
+    nodes: Vec<Node>,
+    jobs: std::collections::VecDeque<(PathBuf, u32)>,
+    active: usize,
+    error: Option<String>,
+}
+pub fn scan(
+    path: &Path,
+    threads: u8,
+    cancelled: &AtomicBool,
+    progress: &AtomicU64,
+) -> Result<Snapshot, String> {
+    if !(1..=32).contains(&threads) {
+        return Err("threads must be between 1 and 32".into());
+    }
+    let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_dir() || is_reparse(&meta) {
+        return Err("scan root must be a non-link directory".into());
+    }
+    let root = fs::canonicalize(path).map_err(|e| e.to_string())?;
+    let mut first = Node::new(OsString::new(), NONE);
+    first.is_dir = true;
+    first.directories = 1;
+    let queue = std::sync::Mutex::new(Queue {
+        nodes: vec![first],
+        jobs: std::collections::VecDeque::from([(root.clone(), 0)]),
+        active: 0,
+        error: None,
+    });
+    let links = std::sync::Mutex::new(HashSet::new());
+    let wake = std::sync::Condvar::new();
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    let (dir, parent) = {
+                        let mut q = queue.lock().expect("tree queue poisoned");
+                        loop {
+                            if cancelled.load(Ordering::Relaxed) || q.error.is_some() {
+                                wake.notify_all();
+                                return;
+                            }
+                            if let Some(job) = q.jobs.pop_front() {
+                                q.active += 1;
+                                break job;
+                            }
+                            if q.active == 0 {
+                                return;
+                            }
+                            q = wake.wait(q).expect("tree queue poisoned");
+                        }
+                    };
+                    match fs::read_dir(&dir) {
+                        Ok(listing) => {
+                            for item in listing {
+                                if cancelled.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                let entry = match item {
+                                    Ok(e) => e,
+                                    Err(e) => {
+                                        let mut q = queue.lock().expect("tree queue poisoned");
+                                        let n = &mut q.nodes[parent as usize];
+                                        n.error = Some(e.to_string());
+                                        n.complete = false;
+                                        continue;
+                                    }
+                                };
+                                let path = entry.path();
+                                let mut node = Node::new(entry.file_name(), parent);
+                                let mut descend = false;
+                                match fs::symlink_metadata(&path) {
+                                    Ok(m) if m.file_type().is_symlink() || is_reparse(&m) => {
+                                        node.complete = false;
+                                        node.error = Some("link/reparse point skipped".into());
+                                    }
+                                    Ok(m) if m.is_dir() => {
+                                        node.is_dir = true;
+                                        node.directories = 1;
+                                        descend = true;
+                                    }
+                                    Ok(m) if m.is_file() => {
+                                        node.files = 1;
+                                        node.logical = m.len();
+                                        match allocation::file_allocation(&path, &m) {
+                                            Ok(a) => {
+                                                if a.shared_id.is_none_or(|id| {
+                                                    links
+                                                        .lock()
+                                                        .expect("link set poisoned")
+                                                        .insert(id)
+                                                }) {
+                                                    node.allocated = a.bytes;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                node.complete = false;
+                                                node.error = Some(format!("allocation: {e}"));
+                                            }
+                                        }
+                                    }
+                                    Ok(_) => {
+                                        node.complete = false;
+                                        node.error = Some("unsupported entry".into());
+                                    }
+                                    Err(e) => {
+                                        node.complete = false;
+                                        node.error = Some(e.to_string());
+                                    }
+                                }
+                                let mut q = queue.lock().expect("tree queue poisoned");
+                                let id = match u32::try_from(q.nodes.len()) {
+                                    Ok(id) if id != NONE => id,
+                                    _ => {
+                                        q.error =
+                                            Some("tree exceeds supported number of entries".into());
+                                        wake.notify_all();
+                                        break;
+                                    }
+                                };
+                                node.next_sibling = q.nodes[parent as usize].first_child;
+                                q.nodes[parent as usize].first_child = id;
+                                q.nodes.push(node);
+                                if descend {
+                                    q.jobs.push_back((path, id));
+                                    wake.notify_one();
+                                }
+                                progress.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        Err(e) => {
+                            let mut q = queue.lock().expect("tree queue poisoned");
+                            let n = &mut q.nodes[parent as usize];
+                            n.error = Some(e.to_string());
+                            n.complete = false;
+                        }
+                    }
+                    let mut q = queue.lock().expect("tree queue poisoned");
+                    q.active -= 1;
+                    wake.notify_all();
+                }
+            });
+        }
+    });
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("scan cancelled".into());
+    }
+    let state = queue.into_inner().map_err(|e| e.to_string())?;
+    if let Some(error) = state.error {
+        return Err(error);
+    }
+    let mut nodes = state.nodes;
+    for id in (1..nodes.len()).rev() {
+        let (parent, logical, allocated, files, directories, complete) = {
+            let n = &nodes[id];
+            (
+                n.parent as usize,
+                n.logical,
+                n.allocated,
+                n.files,
+                n.directories,
+                n.complete,
+            )
+        };
+        let n = &mut nodes[parent];
+        n.logical = n.logical.saturating_add(logical);
+        n.allocated = n.allocated.saturating_add(allocated);
+        n.files = n.files.saturating_add(files);
+        n.directories = n.directories.saturating_add(directories);
+        n.complete &= complete;
+    }
+    // Sort siblings once instead of on every UI frame.
+    for id in 0..nodes.len() {
+        if !nodes[id].is_dir {
+            continue;
+        }
+        let mut children = Vec::new();
+        let mut child = nodes[id].first_child;
+        while child != NONE {
+            children.push(child);
+            child = nodes[child as usize].next_sibling;
+        }
+        children.sort_unstable_by(|a, b| {
+            nodes[*b as usize]
+                .logical
+                .cmp(&nodes[*a as usize].logical)
+                .then_with(|| nodes[*a as usize].name.cmp(&nodes[*b as usize].name))
+        });
+        nodes[id].first_child = children.first().copied().unwrap_or(NONE);
+        for (i, child) in children.iter().enumerate() {
+            nodes[*child as usize].next_sibling = children.get(i + 1).copied().unwrap_or(NONE);
+        }
+    }
+    Ok(Snapshot { root, nodes })
+}
+pub fn new_controls() -> (Arc<AtomicBool>, Arc<AtomicU64>) {
+    (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicU64::new(0)),
+    )
+}
+
+fn raw_units(name: &std::ffi::OsStr) -> Vec<u32> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        name.encode_wide().map(u32::from).collect()
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        name.as_bytes().iter().copied().map(u32::from).collect()
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = name;
+        Vec::new()
+    }
+}
+impl Snapshot {
+    /// Write a parent-indexed JSONL snapshot without building one giant JSON document.
+    pub fn write_jsonl(&self, out: &mut impl std::io::Write) -> Result<(), String> {
+        use serde_json::json;
+        writeln!(out, "{}", json!({"type":"tree","root":self.root.to_string_lossy(),"root_units":raw_units(self.root.as_os_str()),"name_encoding":if cfg!(windows) {"utf16"} else {"bytes"},"entries":self.nodes.len(),"complete":self.nodes[0].complete,"logical_bytes":self.nodes[0].logical,"allocated_bytes":self.nodes[0].allocated})).map_err(|e|e.to_string())?;
+        for (id, node) in self.nodes.iter().enumerate() {
+            let raw_name = raw_units(&node.name);
+            writeln!(out,"{}",json!({"type":"entry","id":id,"parent":if id==0 { None } else { Some(node.parent) },"name":node.name.to_string_lossy(),"name_units":raw_name,"name_encoding":if cfg!(windows) {"utf16"} else {"bytes"},"directory":node.is_dir,"logical_bytes":node.logical,"allocated_bytes":node.allocated,"files":node.files,"directories":node.directories,"complete":node.complete,"error":node.error})).map_err(|e|e.to_string())?;
+        }
+        out.flush().map_err(|e| e.to_string())
+    }
+}
+pub fn stdout_tree(path: &Path, threads: u8) -> Result<(), String> {
+    let (stop, progress) = new_controls();
+    let snapshot = scan(path, threads, &stop, &progress)?;
+    snapshot.write_jsonl(&mut std::io::stdout().lock())
+}
+pub fn save_tree(path: &Path, output: &Path, threads: u8) -> Result<serde_json::Value, String> {
+    let root = fs::canonicalize(path).map_err(|e| e.to_string())?;
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let destination = fs::canonicalize(parent)
+        .map_err(|e| e.to_string())?
+        .join(output.file_name().ok_or("invalid output path")?);
+    if destination.starts_with(&root) {
+        return Err("tree output cannot be inside the scanned directory".into());
+    }
+    if fs::symlink_metadata(&destination).is_ok() {
+        return Err("tree output already exists".into());
+    }
+    let (stop, progress) = new_controls();
+    let snapshot = scan(path, threads, &stop, &progress)?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination)
+        .map_err(|e| e.to_string())?;
+    snapshot.write_jsonl(&mut file)?;
+    Ok(
+        serde_json::json!({"output":destination.to_string_lossy(),"entries":snapshot.nodes.len(),"complete":snapshot.nodes[0].complete,"logical_bytes":snapshot.nodes[0].logical,"allocated_bytes":snapshot.nodes[0].allocated}),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn snapshot_keeps_tree_and_aggregates_hard_links() {
+        let root = std::env::temp_dir().join(format!(
+            "filetree233-tree-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("a/nested")).unwrap();
+        fs::create_dir_all(root.join("b")).unwrap();
+        let original = root.join("a/nested/雪.txt");
+        fs::write(&original, vec![1; 32768]).unwrap();
+        fs::hard_link(&original, root.join("b/link")).unwrap();
+        let (stop, progress) = new_controls();
+        let tree = scan(&root, 4, &stop, &progress).unwrap();
+        let (serial_stop, serial_progress) = new_controls();
+        let serial = scan(&root, 1, &serial_stop, &serial_progress).unwrap();
+        assert_eq!(tree.nodes[0].logical, serial.nodes[0].logical);
+        assert_eq!(tree.nodes[0].allocated, serial.nodes[0].allocated);
+        assert_eq!(tree.nodes[0].files, serial.nodes[0].files);
+        assert_eq!(tree.nodes[0].directories, serial.nodes[0].directories);
+        assert_eq!(tree.nodes[0].logical, 65536);
+        assert_eq!(tree.nodes[0].files, 2);
+        assert_eq!(tree.nodes[0].directories, 4);
+        assert_eq!(progress.load(Ordering::Relaxed), 5);
+        let expected = allocation::file_allocation(&original, &fs::metadata(&original).unwrap())
+            .unwrap()
+            .bytes;
+        assert_eq!(tree.nodes[0].allocated, expected);
+        let area = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(200.0, 100.0),
+        );
+        let tiles = crate::treemap::layout(&tree, 0, area, 2);
+        assert!(tiles.len() <= 2);
+        assert!(!tiles.is_empty());
+        let sum: f32 = tiles.iter().map(|t| t.rect.width() * t.rect.height()).sum();
+        assert!((sum - area.width() * area.height()).abs() < 0.1);
+        for i in 0..tiles.len() {
+            assert!(area.contains_rect(tiles[i].rect));
+            for j in i + 1..tiles.len() {
+                assert!(!tiles[i].rect.intersect(tiles[j].rect).is_positive());
+            }
+        }
+        let a = tree
+            .children(0)
+            .into_iter()
+            .find(|id| tree.nodes[*id as usize].name == "a")
+            .unwrap();
+        let nested = tree.children(a)[0];
+        let file = tree.children(nested)[0];
+        assert_eq!(tree.path(file), fs::canonicalize(&original).unwrap());
+        stop.store(true, Ordering::Relaxed);
+        assert!(
+            scan(&root, 4, &stop, &progress)
+                .unwrap_err()
+                .contains("cancelled")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}

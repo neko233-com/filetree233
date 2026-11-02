@@ -143,3 +143,65 @@ fn mcp_scan_accepts_and_validates_parallelism() {
     assert!(proc.wait().unwrap().success());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn mcp_tree_exports_once_and_rejects_output_inside_root() {
+    let root = std::env::temp_dir().join(format!(
+        "filetree233-mcp-tree-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let target = root.join("target");
+    fs::create_dir_all(target.join("nested")).unwrap();
+    fs::write(target.join("nested/demo"), b"hello").unwrap();
+    let output = root.join("tree.jsonl");
+    let mut proc = Command::new(env!("CARGO_BIN_EXE_filetree233"))
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = proc.stdin.take().unwrap();
+    let mut reader = BufReader::new(proc.stdout.take().unwrap());
+    fn call(
+        w: &mut impl Write,
+        r: &mut impl BufRead,
+        id: u8,
+        path: &std::path::Path,
+        output: &std::path::Path,
+    ) -> Value {
+        writeln!(w,"{}",json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"tree","arguments":{"path":path,"output":output}}})).unwrap();
+        w.flush().unwrap();
+        let mut line = String::new();
+        r.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+    assert_eq!(
+        call(
+            &mut input,
+            &mut reader,
+            1,
+            &target,
+            &target.join("inside.jsonl")
+        )["result"]["isError"],
+        true
+    );
+    assert_eq!(
+        call(&mut input, &mut reader, 2, &target, &output)["result"]["isError"],
+        false
+    );
+    let lines = fs::read_to_string(&output).unwrap();
+    let rows: Vec<Value> = lines
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows[0]["logical_bytes"], 5);
+    assert!(rows.iter().any(|r| r["name"] == "demo"));
+    assert_eq!(
+        call(&mut input, &mut reader, 3, &target, &output)["result"]["isError"],
+        true
+    );
+    drop(input);
+    assert!(proc.wait().unwrap().success());
+    fs::remove_dir_all(root).unwrap();
+}
