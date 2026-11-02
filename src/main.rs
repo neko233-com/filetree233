@@ -879,6 +879,45 @@ mod tests {
         }
     }
     #[test]
+    fn demo_reparse_point_is_skipped_and_cannot_be_planned() {
+        let f = Fixture::new();
+        let target = f.0.join("outside");
+        let root = f.0.join("data");
+        fs::create_dir(&target).unwrap();
+        fs::create_dir(&root).unwrap();
+        fs::write(target.join("do-not-follow"), b"external").unwrap();
+        fs::write(root.join("inside"), b"demo").unwrap();
+        let link = root.join("junction");
+        #[cfg(windows)]
+        {
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(&target)
+                .output()
+                .unwrap();
+            assert!(
+                status.status.success(),
+                "junction creation failed: {}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let result = scan_with_threads(&root, 4).unwrap();
+        assert_eq!(result["complete"], false);
+        let e = result["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["path"].as_str().unwrap().ends_with("junction"))
+            .unwrap();
+        assert_eq!(e["complete"], false);
+        assert_eq!(e["bytes"], 0);
+        assert!(make_plan(std::slice::from_ref(&root), &f.0.join("plan.json")).is_err());
+        assert!(target.join("do-not-follow").exists());
+    }
+    #[test]
     fn does_not_overwrite_plan() {
         let f = Fixture::new();
         let target = f.0.join("a");
