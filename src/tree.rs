@@ -23,7 +23,10 @@ pub struct Node {
     pub files: u64,
     pub directories: u64,
     pub is_dir: bool,
-    pub error: Option<String>,
+    // Errors are rare; keeping their String out of line saves space on every
+    // successful node in large snapshots.
+    #[allow(clippy::box_collection)] // Saves 16 bytes per node; errors are uncommon.
+    pub error: Option<Box<String>>,
     pub complete: bool,
 }
 impl Node {
@@ -184,7 +187,7 @@ pub fn scan(
                                     Err(e) => {
                                         let mut q = queue.lock().expect("tree queue poisoned");
                                         let n = &mut q.nodes[parent as usize];
-                                        n.error = Some(e.to_string());
+                                        n.error = Some(Box::new(e.to_string()));
                                         n.complete = false;
                                         continue;
                                     }
@@ -195,7 +198,8 @@ pub fn scan(
                                 match fs::symlink_metadata(&path) {
                                     Ok(m) if m.file_type().is_symlink() || is_reparse(&m) => {
                                         node.complete = false;
-                                        node.error = Some("link/reparse point skipped".into());
+                                        node.error =
+                                            Some(Box::new("link/reparse point skipped".into()));
                                     }
                                     Ok(m) if m.is_dir() => {
                                         node.is_dir = true;
@@ -218,17 +222,18 @@ pub fn scan(
                                             }
                                             Err(e) => {
                                                 node.complete = false;
-                                                node.error = Some(format!("allocation: {e}"));
+                                                node.error =
+                                                    Some(Box::new(format!("allocation: {e}")));
                                             }
                                         }
                                     }
                                     Ok(_) => {
                                         node.complete = false;
-                                        node.error = Some("unsupported entry".into());
+                                        node.error = Some(Box::new("unsupported entry".into()));
                                     }
                                     Err(e) => {
                                         node.complete = false;
-                                        node.error = Some(e.to_string());
+                                        node.error = Some(Box::new(e.to_string()));
                                     }
                                 }
                                 batch.push((node, descend.then_some(path)));
@@ -243,7 +248,7 @@ pub fn scan(
                         Err(e) => {
                             let mut q = queue.lock().expect("tree queue poisoned");
                             let n = &mut q.nodes[parent as usize];
-                            n.error = Some(e.to_string());
+                            n.error = Some(Box::new(e.to_string()));
                             n.complete = false;
                         }
                     }
@@ -375,7 +380,8 @@ impl Snapshot {
             let name_display = node.name.to_string_lossy();
             let (safe_path, path_escaped) = spreadsheet_safe(&path_display);
             let (safe_name, name_escaped) = spreadsheet_safe(&name_display);
-            let (safe_error, error_escaped) = spreadsheet_safe(node.error.as_deref().unwrap_or(""));
+            let (safe_error, error_escaped) =
+                spreadsheet_safe(node.error.as_deref().map(String::as_str).unwrap_or(""));
             let path_units =
                 serde_json::to_string(&raw_units(path.as_os_str())).map_err(|e| e.to_string())?;
             let name_units =

@@ -33,6 +33,27 @@ fn peak_memory() -> Result<u64, String> {
     Err("peak memory is unsupported on this platform".into())
 }
 
+fn error_counts(snapshot: &tree::Snapshot) -> Value {
+    let (mut incomplete, mut links, mut allocation, mut other) = (0u64, 0u64, 0u64, 0u64);
+    for node in &snapshot.nodes {
+        incomplete += u64::from(!node.complete);
+        let Some(error) = node.error.as_deref() else {
+            continue;
+        };
+        if matches!(
+            error.as_str(),
+            "link/reparse point skipped" | "MFT reparse point skipped"
+        ) {
+            links += 1;
+        } else if error.starts_with("allocation:") || error.starts_with("allocation unavailable:") {
+            allocation += 1;
+        } else {
+            other += 1;
+        }
+    }
+    json!({"incomplete_nodes":incomplete,"error_nodes":links + allocation + other,"skipped_link_nodes":links,"allocation_error_nodes":allocation,"other_error_nodes":other})
+}
+
 pub fn once(path: &Path, threads: u8, engine: ScanEngine) -> Result<Value, String> {
     let (cancelled, progress) = tree::new_controls();
     let started = Instant::now();
@@ -41,7 +62,7 @@ pub fn once(path: &Path, threads: u8, engine: ScanEngine) -> Result<Value, Strin
     let root = &snapshot.nodes[0];
     let scan_threads = threads;
     Ok(
-        json!({"scan_ms":elapsed_ms,"peak_memory_bytes":peak_memory()?,"memory_metric":if cfg!(windows){"peak_working_set"}else{"peak_rss"},"engine":snapshot.engine,"requested_threads":threads,"scan_threads":scan_threads,"fallback_reason":snapshot.fallback_reason,"entries":snapshot.nodes.len(),"files":root.files,"directories":root.directories,"logical_bytes":root.logical,"allocated_bytes":root.allocated,"complete":root.complete}),
+        json!({"scan_ms":elapsed_ms,"peak_memory_bytes":peak_memory()?,"memory_metric":if cfg!(windows){"peak_working_set"}else{"peak_rss"},"engine":snapshot.engine,"requested_threads":threads,"scan_threads":scan_threads,"fallback_reason":snapshot.fallback_reason,"entries":snapshot.nodes.len(),"files":root.files,"directories":root.directories,"logical_bytes":root.logical,"allocated_bytes":root.allocated,"complete":root.complete,"diagnostics":error_counts(&snapshot)}),
     )
 }
 
@@ -85,4 +106,36 @@ pub fn run(path: &Path, threads: u8, engine: ScanEngine, iterations: u8) -> Resu
     Ok(
         json!({"root":path.to_string_lossy(),"root_path":crate::native_path::value(path),"requested_engine":engine_name,"threads":threads,"requested_threads":threads,"iterations":iterations,"scan_median_ms":median,"runs":runs,"note":"Each run is a separate process; filesystem caches are not cleared. Peak memory includes runtime and tree, not just scan allocations. threads is the requested count; see each run's scan_threads for the actual scan worker count."}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn diagnostics_distinguish_direct_errors_from_incomplete_ancestors() {
+        let mut root = tree::Node::new(Default::default(), tree::NONE);
+        root.is_dir = true;
+        root.complete = false;
+        let mut link = tree::Node::new("link".into(), 0);
+        link.complete = false;
+        link.error = Some(Box::new("link/reparse point skipped".into()));
+        let mut allocation = tree::Node::new("file".into(), 0);
+        allocation.complete = false;
+        allocation.error = Some(Box::new("allocation: access denied".into()));
+        let mut other = tree::Node::new("missing".into(), 0);
+        other.complete = false;
+        other.error = Some(Box::new("permission denied".into()));
+        let snapshot = tree::Snapshot {
+            root: "demo".into(),
+            nodes: vec![root, link, allocation, other],
+            engine: "filesystem_walk",
+            fallback_reason: None,
+        };
+        let counts = error_counts(&snapshot);
+        assert_eq!(counts["incomplete_nodes"], 4);
+        assert_eq!(counts["error_nodes"], 3);
+        assert_eq!(counts["skipped_link_nodes"], 1);
+        assert_eq!(counts["allocation_error_nodes"], 1);
+        assert_eq!(counts["other_error_nodes"], 1);
+    }
 }

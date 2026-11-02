@@ -157,7 +157,11 @@ impl Index {
     pub fn includes_file_parent(&mut self, parent: u64) -> bool {
         if let Some(tree) = &self.snapshot {
             return tree.ids.get(&parent).is_some_and(|id| {
-                tree.nodes[*id as usize].error.as_deref() != Some("MFT reparse point skipped")
+                tree.nodes[*id as usize]
+                    .error
+                    .as_deref()
+                    .map(String::as_str)
+                    != Some("MFT reparse point skipped")
             });
         }
         parent == self.root || self.owner(parent).is_some()
@@ -248,8 +252,9 @@ impl TreeBuilder {
         node.is_dir = true;
         node.directories = 1;
         node.complete = false;
-        node.error =
-            Some("Experimental MFT scan may omit records; verify with filesystem traversal".into());
+        node.error = Some(Box::new(
+            "Experimental MFT scan may omit records; verify with filesystem traversal".into(),
+        ));
         Self {
             nodes: vec![node],
             ids: HashMap::from([(root, 0)]),
@@ -272,7 +277,7 @@ impl TreeBuilder {
         node.directories = u64::from(is_dir && !reparse);
         if reparse {
             node.complete = false;
-            node.error = Some("MFT reparse point skipped".into());
+            node.error = Some(Box::new("MFT reparse point skipped".into()));
         }
         node.next_sibling = self.nodes[parent as usize].first_child;
         let id = self.nodes.len() as u32;
@@ -303,7 +308,12 @@ impl TreeBuilder {
         }
         let mut parent = self.ids[&cursor];
         while let Some(id) = chain.pop() {
-            if self.nodes[parent as usize].error.as_deref() == Some("MFT reparse point skipped") {
+            if self.nodes[parent as usize]
+                .error
+                .as_deref()
+                .map(String::as_str)
+                == Some("MFT reparse point skipped")
+            {
                 excluded.insert(id);
                 excluded.extend(chain);
                 return;
@@ -318,7 +328,12 @@ impl TreeBuilder {
             let Some(&parent) = self.ids.get(&link.parent) else {
                 continue;
             };
-            if self.nodes[parent as usize].error.as_deref() == Some("MFT reparse point skipped") {
+            if self.nodes[parent as usize]
+                .error
+                .as_deref()
+                .map(String::as_str)
+                == Some("MFT reparse point skipped")
+            {
                 continue;
             }
             let mut parts = Vec::new();
@@ -343,7 +358,12 @@ impl TreeBuilder {
             let Some(&parent) = self.ids.get(&link.parent) else {
                 continue;
             };
-            if self.nodes[parent as usize].error.as_deref() == Some("MFT reparse point skipped") {
+            if self.nodes[parent as usize]
+                .error
+                .as_deref()
+                .map(String::as_str)
+                == Some("MFT reparse point skipped")
+            {
                 continue;
             }
             let id = self.add_node(
@@ -356,7 +376,8 @@ impl TreeBuilder {
             );
             if let Some(error) = error {
                 self.nodes[id as usize].complete = false;
-                self.nodes[id as usize].error = Some(format!("allocation unavailable: {error}"));
+                self.nodes[id as usize].error =
+                    Some(Box::new(format!("allocation unavailable: {error}")));
             }
             assigned = true;
         }
@@ -364,7 +385,11 @@ impl TreeBuilder {
     fn add_reparse_file(&mut self, links: &[Link]) {
         for link in links {
             if let Some(&parent) = self.ids.get(&link.parent)
-                && self.nodes[parent as usize].error.as_deref() != Some("MFT reparse point skipped")
+                && self.nodes[parent as usize]
+                    .error
+                    .as_deref()
+                    .map(String::as_str)
+                    != Some("MFT reparse point skipped")
             {
                 self.add_node(parent, &link.name, false, true, 0, 0);
             }
@@ -414,7 +439,10 @@ mod tests {
             assert!(!node.is_dir && !node.complete);
             assert_eq!(node.files, 0);
             assert_eq!(node.directories, 0);
-            assert_eq!(node.error.as_deref(), Some("MFT reparse point skipped"));
+            assert_eq!(
+                node.error.as_deref().map(String::as_str),
+                Some("MFT reparse point skipped")
+            );
         }
         assert!(!tree.nodes.iter().any(|n| n.name == "hidden-link"));
         let mut idx = Index::new(5);
@@ -444,7 +472,7 @@ mod tests {
             let node = tree.nodes.iter().find(|n| n.name == name).unwrap();
             assert!(!node.complete);
             assert_eq!(
-                node.error.as_deref(),
+                node.error.as_deref().map(String::as_str),
                 Some("allocation unavailable: access denied")
             );
             assert!(!tree.nodes[node.parent as usize].complete);

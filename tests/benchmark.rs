@@ -37,6 +37,8 @@ fn benchmark_reports_isolated_scan_measurements() {
         assert_eq!(run["requested_threads"], 2);
         assert_eq!(run["scan_threads"], 2);
         assert_eq!(run["complete"], true);
+        assert_eq!(run["diagnostics"]["error_nodes"], 0);
+        assert_eq!(run["diagnostics"]["incomplete_nodes"], 0);
         assert_eq!(run["entries"], 4);
         assert_eq!(run["files"], 2);
         assert_eq!(run["logical_bytes"], 8);
