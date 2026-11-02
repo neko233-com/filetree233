@@ -127,6 +127,18 @@ struct App {
     recommendations: Option<crate::recommend::Report>,
     recommendation_rx: Option<Receiver<Result<crate::recommend::Report, String>>>,
     recommendation_window_open: bool,
+    search_window_open: bool,
+    search_query: String,
+    search_glob: bool,
+    search_path_match: bool,
+    search_kind: crate::search::Kind,
+    search_min_bytes: u64,
+    search_limit: u16,
+    search_report: Option<crate::search::Report>,
+    search_rx: Option<Receiver<Result<crate::search::Report, String>>>,
+    search_submitted: String,
+    #[cfg(test)]
+    search_hit_rects: Vec<(PathBuf, egui::Rect)>,
     #[cfg(test)]
     suggestion_rects: Vec<(PathBuf, egui::Rect)>,
     tree_current: u32,
@@ -181,6 +193,18 @@ impl Default for App {
             recommendations: None,
             recommendation_rx: None,
             recommendation_window_open: false,
+            search_window_open: false,
+            search_query: String::new(),
+            search_glob: false,
+            search_path_match: false,
+            search_kind: crate::search::Kind::All,
+            search_min_bytes: 0,
+            search_limit: 100,
+            search_report: None,
+            search_rx: None,
+            search_submitted: String::new(),
+            #[cfg(test)]
+            search_hit_rects: Vec::new(),
             #[cfg(test)]
             suggestion_rects: Vec::new(),
             tree_current: 0,
@@ -322,6 +346,9 @@ impl App {
         self.recommendations = None;
         self.recommendation_rx = None;
         self.recommendation_window_open = false;
+        self.search_window_open = false;
+        self.search_rx = None;
+        self.search_report = None;
         self.tree_current = 0;
         self.expanded.clear();
         self.expanded.insert(0);
@@ -462,6 +489,32 @@ impl eframe::App for App {
             }
             self.recommendation_rx = None;
         }
+        if let Some(rx) = &self.search_rx
+            && let Ok(result) = rx.try_recv()
+        {
+            match result {
+                Ok(report) => {
+                    self.status = format!(
+                        "Search: {} matches{}",
+                        report.total_matches,
+                        if report.complete {
+                            ""
+                        } else {
+                            " (incomplete scan)"
+                        }
+                    );
+                    self.search_report = Some(report);
+                }
+                Err(error) => {
+                    self.status = error;
+                    self.search_report = None;
+                }
+            }
+            self.search_rx = None;
+        }
+        if self.search_rx.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
         if self.recommendation_rx.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
@@ -582,6 +635,9 @@ impl eframe::App for App {
                                         self.recommendations = None;
                                         self.recommendation_rx = None;
                                         self.recommendation_window_open = false;
+                                        self.search_window_open = false;
+                                        self.search_rx = None;
+                                        self.search_report = None;
                                         self.selected.clear();
                                     }
                                     Err(e) => self.status = e,
@@ -597,6 +653,7 @@ impl eframe::App for App {
             self.show_tree(ctx);
             self.show_duplicates(ctx);
             self.show_recommendations(ctx);
+            self.show_search(ctx);
             return;
         }
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -717,6 +774,10 @@ impl App {
             .default_width(280.0)
             .show(ctx, |ui| {
                 ui.heading("Directory tree");
+                if ui.button("Search entire tree").clicked() {
+                    self.search_window_open = true;
+                }
+
                 ui.horizontal(|ui| {
                     if self.duplicate_rx.is_none() {
                         if ui.button("Find duplicates").clicked() {
@@ -984,6 +1045,96 @@ impl App {
     }
 }
 
+impl App {
+    fn begin_search(&mut self, ctx: &egui::Context) {
+        if self.search_rx.is_some() {
+            return;
+        }
+        let Some(tree) = self.tree.as_ref().cloned() else {
+            return;
+        };
+        let options = crate::search::Options {
+            query: self.search_query.clone(),
+            glob: self.search_glob,
+            path_match: self.search_path_match,
+            kind: self.search_kind,
+            min_bytes: self.search_min_bytes,
+            limit: usize::from(self.search_limit),
+        };
+        self.search_submitted = options.query.clone();
+        self.search_report = None;
+        let (tx, rx) = mpsc::channel();
+        self.search_rx = Some(rx);
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::search::find(&tree, &options)
+            }))
+            .unwrap_or_else(|_| Err("search worker failed unexpectedly".into()));
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
+    fn show_search(&mut self, ctx: &egui::Context) {
+        if !self.search_window_open {
+            return;
+        }
+        let mut open = self.search_window_open;
+        let mut navigate = None;
+        #[cfg(test)]
+        self.search_hit_rects.clear();
+        egui::Window::new("Search entire tree").open(&mut open).resizable(true).default_size([800.0,520.0]).show(ctx,|ui| {
+            ui.horizontal(|ui| { ui.label("Query");ui.text_edit_singleline(&mut self.search_query);ui.checkbox(&mut self.search_glob,"Glob");ui.checkbox(&mut self.search_path_match,"Full path"); });
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("search-kind").selected_text(format!("{:?}",self.search_kind)).show_ui(ui,|ui| {
+                    ui.selectable_value(&mut self.search_kind,crate::search::Kind::All,"All");ui.selectable_value(&mut self.search_kind,crate::search::Kind::File,"Files");ui.selectable_value(&mut self.search_kind,crate::search::Kind::Directory,"Directories");
+                });
+                ui.label("Min logical bytes");ui.add(egui::DragValue::new(&mut self.search_min_bytes));
+                ui.label("Limit");ui.add(egui::DragValue::new(&mut self.search_limit).range(1..=10000));
+                if ui.add_enabled(self.search_rx.is_none(),egui::Button::new("Search")).clicked(){self.begin_search(ctx);}
+                if self.search_rx.is_some(){ui.label("Searching...");}
+            });
+            if let Some(report)=&self.search_report {
+                ui.label(format!("Query {:?}: {} matches, showing {} largest{}",self.search_submitted,report.total_matches,report.hits.len(),if report.complete {""} else {" (incomplete scan)"}));
+                egui::ScrollArea::vertical().show_rows(ui,25.0,report.hits.len(),|ui,range| {
+                    for i in range {let hit=&report.hits[i];ui.horizontal(|ui| {
+                        let mut selected=self.selected.contains(&hit.path);
+                        let response=ui.checkbox(&mut selected,"");
+                        #[cfg(test)]
+                        self.search_hit_rects.push((hit.path.clone(),response.rect));
+                        if response.changed(){if selected {self.selected.push(hit.path.clone());}else{self.selected.retain(|p|p!=&hit.path);}self.plan_data=None;}
+                        if ui.small_button("Open").clicked(){navigate=Some(hit.id);}
+                        ui.label(format!("{} bytes",hit.logical));ui.label(hit.path.to_string_lossy());if !hit.complete {ui.colored_label(Color32::LIGHT_RED,"incomplete");}
+                    });}
+                });
+            }
+            ui.label("Selection only; create and confirm a cleanup plan to act. Text matching can be lossy for non-Unicode names.");
+        });
+        self.search_window_open = open;
+        if let Some(id) = navigate
+            && let Some(tree) = self.tree.as_ref().cloned()
+        {
+            let selected = if tree.nodes[id as usize].is_dir {
+                id
+            } else {
+                tree.nodes[id as usize].parent
+            };
+            self.tree_current = selected;
+            let mut current = selected;
+            loop {
+                self.expanded.insert(current);
+                if let Some(parent) = tree.parent(current) {
+                    current = parent;
+                } else {
+                    break;
+                }
+            }
+            self.visible_dirty = true;
+            self.set_tree_path(&tree.path(selected));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1209,5 +1360,76 @@ mod tests {
         assert!(!is_lossless_display_path(
             &serde_json::json!({"error":"unavailable"})
         ));
+    }
+    #[test]
+    fn search_results_require_explicit_selection() {
+        let root = std::env::temp_dir().join(format!(
+            "filetree233-gui-search-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("demo.log"), b"demo").unwrap();
+        let (stop, progress) = crate::tree::new_controls();
+        let tree = crate::tree::scan(&root, 2, &stop, &progress).unwrap();
+        let opts = crate::search::Options {
+            query: ".log".into(),
+            glob: false,
+            path_match: false,
+            kind: crate::search::Kind::File,
+            min_bytes: 0,
+            limit: 100,
+        };
+        let report = crate::search::find(&tree, &opts).unwrap();
+        let expected = report.hits[0].path.clone();
+        let mut app = App {
+            tree: Some(Arc::new(tree)),
+            search_report: Some(report),
+            search_window_open: true,
+            search_submitted: ".log".into(),
+            plan_data: Some(vec![1]),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let size = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1100.0, 720.0),
+        ));
+        for _ in 0..2 {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: size,
+                    ..Default::default()
+                },
+                |ctx| app.show_search(ctx),
+            );
+        }
+        assert!(app.selected.is_empty());
+        let pos = app.search_hit_rects[0].1.center();
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: size,
+                    events: vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ctx| app.show_search(ctx),
+            );
+        }
+        assert_eq!(app.selected, vec![expected]);
+        assert!(app.plan_data.is_none());
+        assert!(root.join("demo.log").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

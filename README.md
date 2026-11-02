@@ -5,8 +5,8 @@
 ## 已实现
 
 - 磁盘总览：列出已发现的卷及总容量、可用空间，也可查询任意指定路径的文件系统容量。
-- 原生桌面窗口：支持选择已发现的卷；普通遍历支持并行构建完整目录快照、展开树、导航和分层 treemap；显示逻辑大小及文件分配量，查找内容相同的文件、查看有风险说明的清理建议，选择文件或目录并生成清理计划。Windows NTFS MFT 实验引擎也可生成完整树，结果标记为不完整。
-- CLI：`scan`、`tree`、`duplicates`、`recommend`、`plan`、`apply`；MCP stdio 也提供这些操作。
+- 原生桌面窗口：支持选择已发现的卷；普通遍历支持并行构建完整目录快照、展开树、导航和分层 treemap；显示逻辑大小及文件分配量，全树搜索、查找内容相同的文件、查看有风险说明的清理建议，选择文件或目录并生成清理计划。Windows NTFS MFT 实验引擎也可生成完整树，结果标记为不完整。
+- CLI：`scan`、`tree`、`duplicates`、`search`、`recommend`、`plan`、`apply`；MCP stdio 也提供这些操作。
 - 清理必须先生成计划；执行前展示目录、大小和数量，人工输入确认码后再次检查计划与目录，再按计划移入回收站或永久删除；默认回收站；计划展示逻辑大小和去重后的文件分配量。MCP 客户端不支持 elicitation 时拒绝执行。
 - 扫描跳过符号链接及 Windows reparse point，保留其他可见文件大小并标记不完整；创建计划时遇到不可读取项或链接则拒绝。
 
@@ -25,6 +25,8 @@ filetree233 tree /path/to/dir --threads 4 > tree.jsonl
 filetree233 tree C:\Data --engine mft > mft-tree.jsonl  # Windows NTFS, experimental
 filetree233 duplicates /path/to/dir --threads 4
 filetree233 recommend /path/to/dir --threads 4
+filetree233 search /path/to/dir "*.log" --glob --kind file --limit 100
+filetree233 search /path/to/dir "**/cache/*.tmp" --glob --path-match --min-bytes 1024
 filetree233 bench /path/to/dir --threads 4 --iterations 3  # 独立进程测量时间与峰值内存
 filetree233 scan C:\Data --engine mft --json  # Windows NTFS, experimental
 filetree233 scan C:\Data --engine auto --json # MFT or traversal fallback
@@ -67,7 +69,7 @@ Windows 默认安装至 `%LOCALAPPDATA%\Programs\filetree233`；Linux/macOS 默�
 {"mcpServers":{"filetree233":{"command":"C:\\path\\to\\filetree233.exe","args":["serve"]}}}
 ```
 
-`volumes()` 返回已发现的卷，`capacity(path)` 查询指定路径的文件系统容量；`tree(path, output, threads?, engine?)` 将完整树写入扫描目录之外的新 JSONL 文件，禁止覆盖。`recommend(path, threads?, engine?)` 输出需要人工审核的缓存/构建目录建议、大小与风险，不自动选择或删除；`benchmark(path, threads?, iterations?, engine?)` 测量独立扫描进程的时间和峰值内存；`duplicates(path, threads?)` 返回重复文件及硬链接别名，不执行删除；`scan(path, threads?, engine?)` 返回子项大小、数量及扫描错误；`engine` 可选 `walk`、`mft`、`auto`，默认 `walk`；`plan(paths, output, mode?)` 生成计划而不删除，`mode` 为 `recycle`（默认）或 `permanent`；`apply(plan)` 通过 MCP 客户端展示计划并要求用户输入确认码，确认后重新校验再执行。客户端和本地系统必须可信：恶意客户端可以伪造 elicitation 答复。MCP 的路径参数可以是普通字符串，也可以是 `{"encoding":"utf16","units":[...]}`（Windows）或 `{"encoding":"bytes","units":[...]}`（Unix）；可使用扫描返回的 `path_units`，不要用有损显示文本替代原始路径。
+`volumes()` 返回已发现的卷，`capacity(path)` 查询指定路径的文件系统容量；`tree(path, output, threads?, engine?)` 将完整树写入扫描目录之外的新 JSONL 文件，禁止覆盖。`search(path, query, glob?, path_match?, kind?, min_bytes?, limit?, threads?, engine?)` 搜索整棵树并返回最大的匹配项；`recommend(path, threads?, engine?)` 输出需要人工审核的缓存/构建目录建议、大小与风险，不自动选择或删除；`benchmark(path, threads?, iterations?, engine?)` 测量独立扫描进程的时间和峰值内存；`duplicates(path, threads?)` 返回重复文件及硬链接别名，不执行删除；`scan(path, threads?, engine?)` 返回子项大小、数量及扫描错误；`engine` 可选 `walk`、`mft`、`auto`，默认 `walk`；`plan(paths, output, mode?)` 生成计划而不删除，`mode` 为 `recycle`（默认）或 `permanent`；`apply(plan)` 通过 MCP 客户端展示计划并要求用户输入确认码，确认后重新校验再执行。客户端和本地系统必须可信：恶意客户端可以伪造 elicitation 答复。MCP 的路径参数可以是普通字符串，也可以是 `{"encoding":"utf16","units":[...]}`（Windows）或 `{"encoding":"bytes","units":[...]}`（Unix）；可使用扫描返回的 `path_units`，不要用有损显示文本替代原始路径。
 
 ## 限制与安全边界
 
@@ -75,6 +77,7 @@ Windows 默认安装至 `%LOCALAPPDATA%\Programs\filetree233`；Linux/macOS 默�
 - 卷列表是查询时的系统快照。Linux 自动列表不包含网络和 tmpfs 挂载，可通过 `capacity PATH` 显式查询；网络文件系统查询可能受网络状态影响。Windows 的总量和可用量可能受用户配额影响。
 - 文件系统遍历可设置 1～32 个工作线程（默认 4），按目录并行，单个目录中的子目录也会分配给其他工作线程；机械硬盘或网络盘上增加线程可能变慢。完整树模式将节点保存在内存中，内存随文件数量增长；treemap 最多绘制 2048 个区域，多余项目会汇总为 Other。完整树支持进度和取消；MFT 完整树模式显示已读取的记录数并支持取消；MFT 一级汇总模式尚不支持实时进度或取消。清理建议使用目录名和项目标记进行启发式匹配，可能遗漏或误报；最多返回 10,000 条，并抑制已建议目录内的嵌套建议。
 - 重复文件查找按大小、分段哈希、完整 SHA-256 和逐字节比较筛选，硬链接作为同一文件的别名；读取失败或扫描不完整会标记结果不完整。搜索结果不会自动选择或删除文件。文件在检查后仍可能发生变化，共享存储或稀疏文件的实际可回收空间也可能不同。
+- 全树搜索默认按名称做不区分大小写的子串匹配；`--glob` 使用通配符，`--path-match` 匹配完整路径，最多返回 10,000 条且按逻辑大小排序。非 Unicode 名称的子串匹配可能有损，结果保留原始路径码元；搜索不会自动选择或删除。
 - 清理建议是待检查的线索，不代表目录可安全删除。建议包括 Rust `target`、Node `node_modules` / `.next`、Python 缓存、Gradle 缓存以及 Unity 项目的 `Library` / `Temp`；清理可能触发重新下载、重新构建或丢失自定义文件。大小是扫描快照，不等于可回收空间；生成计划时会重新统计并检查。
 - `apply` 按计划中的模式移动到系统回收站或永久删除，可能部分成功；回收站通常不会立即释放空间，恢复受系统及回收站设置影响；Windows 网络路径不支持回收站模式。失败不会由程序自动改为永久删除。不要把计划文件交给不可信用户修改。计划拒绝磁盘根目录、当前工作目录及其祖先、重叠目录和包含计划文件的目录。
 - 新计划格式为版本 5，显式记录处置模式，并对原始文件名、文件身份、状态变更时间、类型、长度和修改时间建立指纹；版本 4 仍可使用，版本 2、3 须重新生成。无法转换为 Unicode 的路径在计划中以原始字节或 UTF-16 码元保存，并在确认时显示完整编码；系统回收站可能拒绝某些此类路径。扫描结果提供 `path_units` / `name_units`，界面显示可能包含替代字符；一级汇总允许按原始路径选择，但无法从文本框导航到有损路径。该指纹不读取文件内容，不能保证发现所有内容变化；校验到删除之间存在竞态。请关闭相关程序，避免扫描与不受信任进程共同写入的目录，并备份重要数据。
