@@ -1,0 +1,87 @@
+name: Build and release
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            asset: filetree233-windows-x64.exe
+            exe: filetree233.exe
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            asset: filetree233-windows-arm64.exe
+            exe: filetree233.exe
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: filetree233-linux-x64
+            exe: filetree233
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: filetree233-linux-arm64
+            exe: filetree233
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset: filetree233-macos-arm64
+            exe: filetree233
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            asset: filetree233-macos-x64
+            exe: filetree233
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev libgl1-mesa-dev libx11-dev libxcb1-dev libxrandr-dev libxi-dev libxcursor-dev
+      - run: cargo test --release --locked --target ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - shell: bash
+        run: |
+          "target/${{ matrix.target }}/release/${{ matrix.exe }}" --version
+          cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" "${{ matrix.asset }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Check assets and hashes
+        shell: bash
+        run: |
+          cd artifacts
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 6
+          sha256sum filetree233-* > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body_path: RELEASE_NOTES.md
+          files: artifacts/*
+          fail_on_unmatched_files: true
