@@ -23,6 +23,7 @@ struct Total {
     files: u64,
     directories: u64,
     reparse: bool,
+    allocation_errors: u64,
 }
 pub struct Index {
     root: u64,
@@ -144,9 +145,6 @@ impl Index {
         }
         None
     }
-    pub fn note_allocation_unknown(&mut self) {
-        self.allocation_unknown += 1;
-    }
     /// Whether a file link's parent is inside the selected tree and traversable.
     /// Call only after `finish_directories` has built the directory index.
     pub fn includes_file_parent(&mut self, parent: u64) -> bool {
@@ -158,8 +156,15 @@ impl Index {
         parent == self.root || self.owner(parent).is_some()
     }
     pub fn add_file(&mut self, links: &[Link], logical: u64, allocated: u64) {
+        self.add_file_impl(links, logical, allocated, None);
+    }
+    pub fn add_file_unknown(&mut self, links: &[Link], logical: u64, error: &str) {
+        self.allocation_unknown += 1;
+        self.add_file_impl(links, logical, 0, Some(error));
+    }
+    fn add_file_impl(&mut self, links: &[Link], logical: u64, allocated: u64, error: Option<&str>) {
         if let Some(tree) = &mut self.snapshot {
-            tree.add_file(links, logical, allocated);
+            tree.add_file(links, logical, allocated, error);
             return;
         }
         let mut assigned = false;
@@ -174,6 +179,9 @@ impl Index {
                 let row = self.rows.entry(name).or_default();
                 row.logical = row.logical.saturating_add(logical);
                 row.files += 1;
+                if error.is_some() {
+                    row.allocation_errors += 1;
+                }
                 if !assigned {
                     row.allocated = row.allocated.saturating_add(allocated);
                     assigned = true;
@@ -190,7 +198,7 @@ impl Index {
     pub fn finish(self, root_path: &Path) -> Value {
         let mut entries: Vec<_> = self.rows.into_iter().map(|(name,t)| {
             let path = root_path.join(name);
-            json!({"path":path.to_string_lossy(),"path_units":crate::tree::raw_units(path.as_os_str()),"bytes":t.logical,"allocated_attributed_bytes":t.allocated,"files":t.files,"directories":t.directories,"complete":false,"error_count":1,"errors":[if t.reparse { "MFT reparse point skipped" } else { "MFT scan is best effort; verify with filesystem traversal" }]})
+            json!({"path":path.to_string_lossy(),"path_units":crate::tree::raw_units(path.as_os_str()),"bytes":t.logical,"allocated_attributed_bytes":t.allocated,"allocation_errors":t.allocation_errors,"files":t.files,"directories":t.directories,"complete":false,"error_count":1,"errors":[if t.reparse { "MFT reparse point skipped" } else { "MFT scan is best effort; verify with filesystem traversal" }]})
         }).collect();
         entries.sort_by(|a, b| {
             b["bytes"]
@@ -305,7 +313,7 @@ impl TreeBuilder {
         }
         None
     }
-    fn add_file(&mut self, links: &[Link], logical: u64, allocated: u64) {
+    fn add_file(&mut self, links: &[Link], logical: u64, allocated: u64, error: Option<&str>) {
         let mut assigned = false;
         for link in links {
             let Some(&parent) = self.ids.get(&link.parent) else {
@@ -314,7 +322,7 @@ impl TreeBuilder {
             if self.nodes[parent as usize].error.as_deref() == Some("MFT reparse point skipped") {
                 continue;
             }
-            self.add_node(
+            let id = self.add_node(
                 parent,
                 &link.name,
                 false,
@@ -322,6 +330,10 @@ impl TreeBuilder {
                 logical,
                 if assigned { 0 } else { allocated },
             );
+            if let Some(error) = error {
+                self.nodes[id as usize].complete = false;
+                self.nodes[id as usize].error = Some(format!("allocation unavailable: {error}"));
+            }
             assigned = true;
         }
     }
@@ -347,6 +359,54 @@ mod tests {
             parent,
             name: name.into(),
         }
+    }
+    #[test]
+    fn unknown_allocation_is_reported_for_all_visible_hardlinks() {
+        let links = [link(10, "one"), link(20, "alias")];
+        let mut idx = Index::new(5);
+        idx.enable_snapshot();
+        idx.add_directory(dir(10, 5, "a", false));
+        idx.add_directory(dir(20, 5, "b", false));
+        idx.finish_directories();
+        idx.add_file_unknown(&links, 100, "access denied");
+        let tree = idx.finish_snapshot(Path::new("/demo"));
+        assert_eq!(tree.nodes[0].logical, 200);
+        assert_eq!(tree.nodes[0].allocated, 0);
+        for name in ["one", "alias"] {
+            let node = tree.nodes.iter().find(|n| n.name == name).unwrap();
+            assert!(!node.complete);
+            assert_eq!(
+                node.error.as_deref(),
+                Some("allocation unavailable: access denied")
+            );
+            assert!(!tree.nodes[node.parent as usize].complete);
+        }
+        let mut jsonl = Vec::new();
+        tree.write_jsonl(&mut jsonl).unwrap();
+        let rows: Vec<serde_json::Value> = jsonl
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        for name in ["one", "alias"] {
+            let row = rows.iter().find(|r| r["name"] == name).unwrap();
+            assert_eq!(row["complete"], false);
+            assert_eq!(row["error"], "allocation unavailable: access denied");
+        }
+        let mut summary = Index::new(5);
+        summary.add_directory(dir(10, 5, "a", false));
+        summary.add_directory(dir(20, 5, "b", false));
+        summary.finish_directories();
+        summary.add_file_unknown(&links, 100, "access denied");
+        let result = summary.finish(Path::new("/demo"));
+        assert_eq!(result["allocation_unknown"], 1);
+        assert!(
+            result["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["allocation_errors"] == 1)
+        );
     }
     #[test]
     fn nested_hardlinks_reparse_and_cycles() {

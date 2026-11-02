@@ -311,9 +311,9 @@ fn scan_index(
                 crate::allocation::file_allocation(&path, &m)
             }) {
                 Ok(a) => a.bytes,
-                Err(_) => {
-                    index.note_allocation_unknown();
-                    0
+                Err(error) => {
+                    index.add_file_unknown(&links, entry.real_size, &error.to_string());
+                    continue;
                 }
             }
         } else {
