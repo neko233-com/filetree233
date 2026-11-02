@@ -169,5 +169,49 @@ fn live_ntfs_volume_finds_created_demo_file() {
         );
     }
     assert_eq!(walk["total_allocated_bytes"], mft["total_allocated_bytes"]);
+    let full = Command::new(env!("CARGO_BIN_EXE_filetree233"))
+        .arg("tree")
+        .arg(&demo)
+        .args(["--engine", "mft"])
+        .output()
+        .unwrap();
+    assert!(
+        full.status.success(),
+        "{}",
+        String::from_utf8_lossy(&full.stderr)
+    );
+    let rows: Vec<Value> = String::from_utf8(full.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows[0]["complete"], false);
+    let entries = &rows[1..];
+    for name in [
+        "alpha",
+        "nested",
+        "data",
+        "hardlink",
+        "中文.txt",
+        "empty",
+        "junction",
+        "sparse.bin",
+        "compressed.bin",
+    ] {
+        assert!(
+            entries.iter().any(|entry| entry["name"] == name),
+            "missing {name}"
+        );
+    }
+    assert_eq!(
+        rows[0]["logical_bytes"],
+        walk["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["bytes"].as_u64())
+            .sum::<u64>()
+    );
+    assert_eq!(rows[0]["allocated_bytes"], walk["total_allocated_bytes"]);
     fs::remove_dir_all(demo).unwrap();
 }

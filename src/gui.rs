@@ -153,7 +153,7 @@ impl App {
         let path = PathBuf::from(&self.path);
         let threads = self.threads;
         let engine = self.engine;
-        let tree_enabled = self.full_tree && engine == ScanEngine::Walk;
+        let tree_enabled = self.full_tree;
         self.scan_is_tree = tree_enabled;
         self.treemap_current = u32::MAX;
         self.treemap_tiles.clear();
@@ -182,7 +182,8 @@ impl App {
         thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 if tree_enabled {
-                    crate::tree::scan(&path, threads, &cancelled, &progress).map(ScanResult::Tree)
+                    crate::scan_full_tree(&path, threads, engine, &cancelled, &progress)
+                        .map(ScanResult::Tree)
                 } else {
                     scan_dispatch(&path, threads, engine).map(ScanResult::Summary)
                 }
@@ -202,7 +203,8 @@ impl eframe::App for App {
                 Ok(ScanResult::Tree(tree)) => {
                     self.path = tree.root.display().to_string();
                     self.status = format!(
-                        "Tree: {} entries, logical {} bytes, allocated {} bytes{}",
+                        "{} tree: {} entries, logical {} bytes, allocated {} bytes{}",
+                        tree.engine,
                         tree.nodes.len().saturating_sub(1),
                         tree.nodes[0].logical,
                         tree.nodes[0].allocated,
@@ -212,6 +214,9 @@ impl eframe::App for App {
                             " (incomplete)"
                         }
                     );
+                    if let Some(reason) = &tree.fallback_reason {
+                        self.status.push_str(&format!("; fallback: {reason}"));
+                    }
                     self.tree = Some(Arc::new(tree));
                 }
                 Ok(ScanResult::Summary(v)) => {
@@ -294,10 +299,7 @@ impl eframe::App for App {
                             "Auto (experimental)",
                         );
                     });
-                ui.add_enabled(
-                    self.engine == ScanEngine::Walk,
-                    egui::Checkbox::new(&mut self.full_tree, "Full tree (walk)"),
-                );
+                ui.checkbox(&mut self.full_tree, "Full tree");
                 if self.rx.is_some() && self.scan_is_tree {
                     ui.label(format!("{} entries", self.progress.load(Ordering::Relaxed)));
                     ctx.request_repaint_after(std::time::Duration::from_millis(250));

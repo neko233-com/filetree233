@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
-const NONE: u32 = u32::MAX;
+pub(crate) const NONE: u32 = u32::MAX;
 
 #[derive(Debug)]
 pub struct Node {
@@ -27,7 +27,7 @@ pub struct Node {
     pub complete: bool,
 }
 impl Node {
-    fn new(name: OsString, parent: u32) -> Self {
+    pub(crate) fn new(name: OsString, parent: u32) -> Self {
         Self {
             name,
             parent,
@@ -47,6 +47,8 @@ impl Node {
 pub struct Snapshot {
     pub root: PathBuf,
     pub nodes: Vec<Node>,
+    pub engine: &'static str,
+    pub fallback_reason: Option<String>,
 }
 impl Snapshot {
     pub fn path(&self, id: u32) -> PathBuf {
@@ -228,7 +230,10 @@ pub fn scan(
     if let Some(error) = state.error {
         return Err(error);
     }
-    let mut nodes = state.nodes;
+    Ok(finalize(root, state.nodes))
+}
+
+pub(crate) fn finalize(root: PathBuf, mut nodes: Vec<Node>) -> Snapshot {
     for id in (1..nodes.len()).rev() {
         let (parent, logical, allocated, files, directories, complete) = {
             let n = &nodes[id];
@@ -270,7 +275,12 @@ pub fn scan(
             nodes[*child as usize].next_sibling = children.get(i + 1).copied().unwrap_or(NONE);
         }
     }
-    Ok(Snapshot { root, nodes })
+    Snapshot {
+        root,
+        nodes,
+        engine: "filesystem_walk",
+        fallback_reason: None,
+    }
 }
 pub fn new_controls() -> (Arc<AtomicBool>, Arc<AtomicU64>) {
     (
@@ -300,7 +310,7 @@ impl Snapshot {
     /// Write a parent-indexed JSONL snapshot without building one giant JSON document.
     pub fn write_jsonl(&self, out: &mut impl std::io::Write) -> Result<(), String> {
         use serde_json::json;
-        writeln!(out, "{}", json!({"type":"tree","root":self.root.to_string_lossy(),"root_units":raw_units(self.root.as_os_str()),"name_encoding":if cfg!(windows) {"utf16"} else {"bytes"},"entries":self.nodes.len(),"complete":self.nodes[0].complete,"logical_bytes":self.nodes[0].logical,"allocated_bytes":self.nodes[0].allocated})).map_err(|e|e.to_string())?;
+        writeln!(out, "{}", json!({"type":"tree","root":self.root.to_string_lossy(),"root_units":raw_units(self.root.as_os_str()),"name_encoding":if cfg!(windows) {"utf16"} else {"bytes"},"entries":self.nodes.len(),"engine":self.engine,"fallback_reason":self.fallback_reason,"complete":self.nodes[0].complete,"logical_bytes":self.nodes[0].logical,"allocated_bytes":self.nodes[0].allocated})).map_err(|e|e.to_string())?;
         for (id, node) in self.nodes.iter().enumerate() {
             let raw_name = raw_units(&node.name);
             writeln!(out,"{}",json!({"type":"entry","id":id,"parent":if id==0 { None } else { Some(node.parent) },"name":node.name.to_string_lossy(),"name_units":raw_name,"name_encoding":if cfg!(windows) {"utf16"} else {"bytes"},"directory":node.is_dir,"logical_bytes":node.logical,"allocated_bytes":node.allocated,"files":node.files,"directories":node.directories,"complete":node.complete,"error":node.error})).map_err(|e|e.to_string())?;
@@ -308,12 +318,12 @@ impl Snapshot {
         out.flush().map_err(|e| e.to_string())
     }
 }
-pub fn stdout_tree(path: &Path, threads: u8) -> Result<(), String> {
-    let (stop, progress) = new_controls();
-    let snapshot = scan(path, threads, &stop, &progress)?;
-    snapshot.write_jsonl(&mut std::io::stdout().lock())
-}
-pub fn save_tree(path: &Path, output: &Path, threads: u8) -> Result<serde_json::Value, String> {
+pub fn save_tree(
+    path: &Path,
+    output: &Path,
+    threads: u8,
+    engine: crate::ScanEngine,
+) -> Result<serde_json::Value, String> {
     let root = fs::canonicalize(path).map_err(|e| e.to_string())?;
     let parent = output
         .parent()
@@ -329,7 +339,7 @@ pub fn save_tree(path: &Path, output: &Path, threads: u8) -> Result<serde_json::
         return Err("tree output already exists".into());
     }
     let (stop, progress) = new_controls();
-    let snapshot = scan(path, threads, &stop, &progress)?;
+    let snapshot = crate::scan_full_tree(path, threads, engine, &stop, &progress)?;
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -337,7 +347,7 @@ pub fn save_tree(path: &Path, output: &Path, threads: u8) -> Result<serde_json::
         .map_err(|e| e.to_string())?;
     snapshot.write_jsonl(&mut file)?;
     Ok(
-        serde_json::json!({"output":destination.to_string_lossy(),"entries":snapshot.nodes.len(),"complete":snapshot.nodes[0].complete,"logical_bytes":snapshot.nodes[0].logical,"allocated_bytes":snapshot.nodes[0].allocated}),
+        serde_json::json!({"output":destination.to_string_lossy(),"entries":snapshot.nodes.len(),"engine":snapshot.engine,"fallback_reason":snapshot.fallback_reason,"complete":snapshot.nodes[0].complete,"logical_bytes":snapshot.nodes[0].logical,"allocated_bytes":snapshot.nodes[0].allocated}),
     )
 }
 
@@ -362,6 +372,8 @@ mod tests {
         root.is_dir = true;
         root.first_child = 1;
         let tree = Snapshot {
+            engine: "filesystem_walk",
+            fallback_reason: None,
             root: PathBuf::from("root"),
             nodes: vec![root, Node::new(name, 0)],
         };

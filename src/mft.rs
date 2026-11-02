@@ -141,8 +141,37 @@ pub fn inspect_stdout(path: &Path, record_size: usize, used_only: bool) -> Resul
 }
 #[cfg(windows)]
 pub fn scan_tree(path: &Path) -> Result<serde_json::Value, String> {
+    let (cancelled, progress) = crate::tree::new_controls();
+    let (index, root) = scan_index(path, false, &cancelled, &progress)?;
+    Ok(index.finish(&root))
+}
+#[cfg(windows)]
+pub fn scan_snapshot(
+    path: &Path,
+    cancelled: &std::sync::atomic::AtomicBool,
+    progress: &std::sync::atomic::AtomicU64,
+) -> Result<crate::tree::Snapshot, String> {
+    let (index, root) = scan_index(path, true, cancelled, progress)?;
+    Ok(index.finish_snapshot(&root))
+}
+#[cfg(not(windows))]
+pub fn scan_snapshot(
+    _: &Path,
+    _: &std::sync::atomic::AtomicBool,
+    _: &std::sync::atomic::AtomicU64,
+) -> Result<crate::tree::Snapshot, String> {
+    Err("MFT tree scanning currently supports Windows only".into())
+}
+#[cfg(windows)]
+fn scan_index(
+    path: &Path,
+    snapshot: bool,
+    cancelled: &std::sync::atomic::AtomicBool,
+    progress: &std::sync::atomic::AtomicU64,
+) -> Result<(crate::mft_index::Index, std::path::PathBuf), String> {
     use crate::mft_index::{Directory, Index, Link};
     use ntfs_mft::FileNameNamespace;
+    use std::sync::atomic::Ordering;
     use std::{
         ffi::OsString,
         fs,
@@ -196,8 +225,15 @@ pub fn scan_tree(path: &Path) -> Result<serde_json::Value, String> {
     };
     let raw = volume.raw_mft().map_err(|e| e.to_string())?;
     let mut index = Index::new(root_id);
+    if snapshot {
+        index.enable_snapshot();
+    }
     let mut root_found = root_id & 0x0000_ffff_ffff_ffff == 5;
     for record in raw.scan_entries().map_err(|e| e.to_string())? {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("scan cancelled".into());
+        }
+        progress.fetch_add(1, Ordering::Relaxed);
         let entry = record.map_err(|e| e.to_string())?;
         if entry.file_reference.get() == root_id {
             root_found = true;
@@ -219,6 +255,10 @@ pub fn scan_tree(path: &Path) -> Result<serde_json::Value, String> {
     }
     index.finish_directories();
     for record in raw.scan_entries().map_err(|e| e.to_string())? {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("scan cancelled".into());
+        }
+        progress.fetch_add(1, Ordering::Relaxed);
         let entry = record.map_err(|e| e.to_string())?;
         if entry.is_directory || entry.is_reparse_point {
             continue;
@@ -271,7 +311,7 @@ pub fn scan_tree(path: &Path) -> Result<serde_json::Value, String> {
         };
         index.add_file(&links, entry.real_size, allocated);
     }
-    Ok(index.finish(&root))
+    Ok((index, root))
 }
 #[cfg(not(windows))]
 pub fn scan_tree(_: &Path) -> Result<serde_json::Value, String> {

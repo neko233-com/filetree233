@@ -139,6 +139,8 @@ mod tests {
             ));
         }
         let tree = crate::tree::Snapshot {
+            engine: "filesystem_walk",
+            fallback_reason: None,
             root: "/demo".into(),
             nodes,
         };
