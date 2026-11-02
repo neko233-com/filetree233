@@ -17,6 +17,9 @@ fn live_ntfs_volume_finds_created_demo_file() {
     );
     let file = root.join(&name);
     fs::write(&file, vec![42; 32768]).unwrap();
+    let mut stream_path = file.as_os_str().to_os_string();
+    stream_path.push(":filetree233_test");
+    fs::write(std::path::PathBuf::from(stream_path), b"stream contents").unwrap();
     let volume_root = file.ancestors().last().unwrap();
     let modes: &[bool] = if std::env::var_os("FILETREE233_TEST_FAST_ONLY").is_some() {
         &[true]
@@ -56,6 +59,15 @@ fn live_ntfs_volume_finds_created_demo_file() {
             .find(|row| row["type"] == "record" && row["name"] == name)
             .expect("created demo file absent from MFT");
         assert_eq!(entry["logical_bytes"], 32768);
+        assert!(
+            entry["alternate_streams"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|stream| {
+                    stream["name"] == "filetree233_test" && stream["logical_bytes"] == 15
+                })
+        );
         assert_eq!(
             rows.last().unwrap()["source"],
             if fast {
@@ -84,6 +96,9 @@ fn live_ntfs_volume_finds_created_demo_file() {
     fs::write(demo.join("alpha/nested/data"), vec![1u8; 32768]).unwrap();
     fs::hard_link(demo.join("alpha/nested/data"), demo.join("beta/hardlink")).unwrap();
     fs::write(demo.join("root-file"), vec![2u8; 8192]).unwrap();
+    // Aggregation counts the unnamed stream only; the MFT inspector still
+    // exposes named streams. A named stream must not change its base size.
+    fs::write(demo.join("root-file:alternate"), vec![7u8; 16384]).unwrap();
     let external_link_target = root.join(format!(
         "filetree233-external-hardlink-{}",
         std::process::id()

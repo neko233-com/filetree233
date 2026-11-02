@@ -145,6 +145,14 @@ pub fn scan_tree(path: &Path) -> Result<serde_json::Value, String> {
     let (index, root) = scan_index(path, false, &cancelled, &progress)?;
     Ok(index.finish(&root))
 }
+#[cfg(any(windows, test))]
+fn aggregation_scan_options() -> ntfs_mft::RawMftScanOptions {
+    // Aggregation intentionally counts only the unnamed data stream. Keep DOS
+    // links here: the caller filters shadowed names while preserving unique ones.
+    ntfs_mft::RawMftScanOptions::builder()
+        .collect_alternate_data_streams(false)
+        .build()
+}
 #[cfg(windows)]
 pub fn scan_snapshot(
     path: &Path,
@@ -233,7 +241,10 @@ fn scan_index(
         index.enable_snapshot();
     }
     let mut root_found = root_id & 0x0000_ffff_ffff_ffff == 5;
-    for record in raw.scan_entries().map_err(|e| e.to_string())? {
+    for record in raw
+        .scan_entries_with_options(aggregation_scan_options())
+        .map_err(|e| e.to_string())?
+    {
         if cancelled.load(Ordering::Relaxed) {
             return Err("scan cancelled".into());
         }
@@ -259,7 +270,10 @@ fn scan_index(
     // link names and opening resident/sparse files until a parent is in scope.
     // For a volume-root scan, avoid the extra lookup on every file.
     let filter_parents = root_id & 0x0000_ffff_ffff_ffff != 5;
-    for record in raw.scan_entries().map_err(|e| e.to_string())? {
+    for record in raw
+        .scan_entries_with_options(aggregation_scan_options())
+        .map_err(|e| e.to_string())?
+    {
         if cancelled.load(Ordering::Relaxed) {
             return Err("scan cancelled".into());
         }
@@ -336,6 +350,12 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
     static NEXT: AtomicUsize = AtomicUsize::new(0);
+    #[test]
+    fn aggregation_omits_unused_named_stream_metadata_but_keeps_dos_links() {
+        let options = aggregation_scan_options();
+        assert!(!options.entry().collect_alternate_data_streams());
+        assert!(options.entry().collect_dos_file_name_links());
+    }
     fn synthetic_record(used: bool) -> [u8; 1024] {
         let mut record = [0u8; 1024];
         record[0..4].copy_from_slice(b"FILE");
