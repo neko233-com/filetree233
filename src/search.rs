@@ -33,6 +33,13 @@ pub struct Report {
     pub complete: bool,
 }
 pub fn find(tree: &Snapshot, opts: &Options) -> Result<Report, String> {
+    find_controlled(tree, opts, &std::sync::atomic::AtomicBool::new(false))
+}
+pub fn find_controlled(
+    tree: &Snapshot,
+    opts: &Options,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<Report, String> {
     if opts.query.is_empty() {
         return Err("search query cannot be empty".into());
     }
@@ -55,6 +62,9 @@ pub fn find(tree: &Snapshot, opts: &Options) -> Result<Report, String> {
     let mut best = BinaryHeap::<Reverse<(u64, u32)>>::with_capacity(opts.limit);
     let mut total_matches = 0u64;
     for (id, node) in tree.nodes.iter().enumerate().skip(1) {
+        if id % 1024 == 0 && cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("search cancelled".into());
+        }
         if node.logical < opts.min_bytes
             || (opts.kind == Kind::File && (node.is_dir || node.files != 1))
             || (opts.kind == Kind::Directory && !node.is_dir)

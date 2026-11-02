@@ -88,6 +88,23 @@ fn scenario(mode: &str) {
     if mode == "changed" {
         fs::write(target.join("new"), b"x").unwrap();
     }
+    if mode == "cancel" {
+        send(
+            &mut input,
+            json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2}}),
+        );
+        send(
+            &mut input,
+            json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"action":"accept","content":{"confirmation":token}}}),
+        );
+        send(&mut input, json!({"jsonrpc":"2.0","id":99,"method":"ping"}));
+        assert_eq!(receive(&mut output)["id"], 99);
+        assert!(target.exists());
+        drop(input);
+        assert!(proc.wait().unwrap().success());
+        fs::remove_dir_all(root).unwrap();
+        return;
+    }
     send(
         &mut input,
         json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"action":if mode == "decline" || mode == "recycle_decline" {"decline"} else {"accept"},"content":{"confirmation":token}}}),
@@ -114,6 +131,64 @@ fn changed_target_does_not_delete() {
 #[test]
 fn approved_plan_deletes_fixture() {
     scenario("approve");
+}
+#[test]
+fn cancelled_confirmation_cannot_delete_even_if_late_reply_arrives() {
+    scenario("cancel");
+}
+
+#[test]
+fn cancelled_analysis_keeps_server_responsive_and_releases_slot() {
+    let root = std::env::temp_dir().join(format!(
+        "filetree233-mcp-cancel-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&root).unwrap();
+    for i in 0..4000 {
+        fs::write(root.join(format!("file-{i:05}")), b"x").unwrap();
+    }
+    let mut proc = Command::new(env!("CARGO_BIN_EXE_filetree233"))
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = proc.stdin.take().unwrap();
+    let mut output = BufReader::new(proc.stdout.take().unwrap());
+    for name in ["scan", "search", "recommend", "duplicates"] {
+        for message in [
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{"path":root,"query":"file","threads":1}}}),
+            json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"ping"}),
+        ] {
+            writeln!(input, "{message}").unwrap();
+        }
+        input.flush().unwrap();
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        let ping: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(ping["id"], 2, "cancelled job must not precede ping: {ping}");
+        let mut recovered = false;
+        for id in 10..110 {
+            writeln!(input, "{}", json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"search","arguments":{"path":root,"query":"file-00000","threads":1}}})).unwrap();
+            input.flush().unwrap();
+            line.clear();
+            output.read_line(&mut line).unwrap();
+            let response: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(response["id"], id);
+            if response["result"]["isError"] == false {
+                recovered = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(recovered, "cancelled {name} did not release its slot");
+    }
+    drop(input);
+    assert!(proc.wait().unwrap().success());
+    assert!(root.join("file-00000").exists());
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

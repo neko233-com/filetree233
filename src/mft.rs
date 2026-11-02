@@ -140,9 +140,13 @@ pub fn inspect_stdout(path: &Path, record_size: usize, used_only: bool) -> Resul
     inspect(path, record_size, used_only, &mut io::stdout().lock())
 }
 #[cfg(windows)]
-pub fn scan_tree(path: &Path, threads: u8) -> Result<serde_json::Value, String> {
-    let (cancelled, progress) = crate::tree::new_controls();
-    let (index, root) = scan_index(path, false, threads, &cancelled, &progress)?;
+pub fn scan_tree_controlled(
+    path: &Path,
+    threads: u8,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<serde_json::Value, String> {
+    let progress = std::sync::atomic::AtomicU64::new(0);
+    let (index, root) = scan_index(path, false, threads, cancelled, &progress)?;
     let mut result = index.finish(&root);
     result["threads"] = json!(threads);
     Ok(result)
@@ -455,7 +459,11 @@ fn scan_index(
     Ok((index, root))
 }
 #[cfg(not(windows))]
-pub fn scan_tree(_: &Path, _: u8) -> Result<serde_json::Value, String> {
+pub fn scan_tree_controlled(
+    _: &Path,
+    _: u8,
+    _: &std::sync::atomic::AtomicBool,
+) -> Result<serde_json::Value, String> {
     Err("MFT directory aggregation currently supports Windows only".into())
 }
 

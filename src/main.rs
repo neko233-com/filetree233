@@ -1,6 +1,7 @@
 mod allocation;
 mod benchmark;
 mod duplicates;
+mod mcp_jobs;
 mod mft;
 #[cfg(any(windows, test))]
 mod mft_index;
@@ -19,6 +20,7 @@ use std::{
     fs,
     io::{self, BufRead, IsTerminal, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 #[derive(Parser)]
@@ -340,6 +342,7 @@ fn count_file(
 fn scan_directory_job(
     path: &Path,
     seen: &std::sync::Mutex<std::collections::HashSet<allocation::FileId>>,
+    cancelled: &AtomicBool,
 ) -> (ScanStats, Vec<PathBuf>) {
     let mut stats = ScanStats::default();
     let mut subdirs = Vec::new();
@@ -366,6 +369,9 @@ fn scan_directory_job(
     match fs::read_dir(path) {
         Ok(entries) => {
             for entry in entries {
+                if cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
                 match entry {
                     Ok(entry) => {
                         let child = entry.path();
@@ -401,7 +407,14 @@ struct ScanQueue {
 fn scan(path: &Path) -> Result<Value, String> {
     scan_with_threads(path, 1)
 }
+#[cfg(test)]
 fn scan_with_threads(path: &Path, threads: u8) -> Result<Value, String> {
+    scan_with_controls(path, threads, &AtomicBool::new(false))
+}
+fn scan_with_controls(path: &Path, threads: u8, cancelled: &AtomicBool) -> Result<Value, String> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
     if !(1..=32).contains(&threads) {
         return Err("threads must be between 1 and 32".into());
     }
@@ -412,6 +425,9 @@ fn scan_with_threads(path: &Path, threads: u8) -> Result<Value, String> {
     let mut children = Vec::new();
     let mut entries = Vec::new();
     for entry in fs::read_dir(&root).map_err(err)? {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
         match entry {
             Ok(entry) => children.push(entry.path()),
             Err(e) => entries.push(json!({"error":e.to_string(),"complete":false})),
@@ -437,6 +453,10 @@ fn scan_with_threads(path: &Path, threads: u8) -> Result<Value, String> {
                     let (index, path) = {
                         let mut q = queue.lock().expect("scan queue poisoned");
                         loop {
+                            if cancelled.load(Ordering::Relaxed) {
+                                wake.notify_all();
+                                return;
+                            }
                             if let Some(job) = q.jobs.pop_front() {
                                 q.active += 1;
                                 break job;
@@ -447,7 +467,7 @@ fn scan_with_threads(path: &Path, threads: u8) -> Result<Value, String> {
                             q = wake.wait(q).expect("scan queue poisoned");
                         }
                     };
-                    let (stats, subdirs) = scan_directory_job(&path, &seen);
+                    let (stats, subdirs) = scan_directory_job(&path, &seen, cancelled);
                     let mut q = queue.lock().expect("scan queue poisoned");
                     q.totals[index].merge(stats);
                     q.jobs.extend(subdirs.into_iter().map(|path| (index, path)));
@@ -457,6 +477,9 @@ fn scan_with_threads(path: &Path, threads: u8) -> Result<Value, String> {
             });
         }
     });
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
     let result = queue.into_inner().map_err(err)?;
     entries.extend(
         result
@@ -513,23 +536,35 @@ fn scan_full_tree(
 }
 const AUTO_SUBDIRECTORY_REASON: &str = "auto selects filesystem traversal for subdirectories";
 fn scan_dispatch(path: &Path, threads: u8, engine: ScanEngine) -> Result<Value, String> {
+    scan_dispatch_controlled(path, threads, engine, &AtomicBool::new(false))
+}
+fn scan_dispatch_controlled(
+    path: &Path,
+    threads: u8,
+    engine: ScanEngine,
+    cancelled: &AtomicBool,
+) -> Result<Value, String> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
     if !(1..=32).contains(&threads) {
         return Err("threads must be between 1 and 32".into());
     }
     match engine {
-        ScanEngine::Walk => scan_with_threads(path, threads),
-        ScanEngine::Mft => mft::scan_tree(path, threads),
+        ScanEngine::Walk => scan_with_controls(path, threads, cancelled),
+        ScanEngine::Mft => mft::scan_tree_controlled(path, threads, cancelled),
         ScanEngine::Auto => {
             let root = fs::canonicalize(path).map_err(err)?;
             if root.parent().is_some() {
-                let mut result = scan_with_threads(&root, threads)?;
+                let mut result = scan_with_controls(&root, threads, cancelled)?;
                 result["fallback_reason"] = json!(AUTO_SUBDIRECTORY_REASON);
                 return Ok(result);
             }
-            match mft::scan_tree(&root, threads) {
+            match mft::scan_tree_controlled(&root, threads, cancelled) {
                 Ok(result) => Ok(result),
+                Err(reason) if cancelled.load(Ordering::Relaxed) => Err(reason),
                 Err(reason) => {
-                    let mut result = scan_with_threads(&root, threads)?;
+                    let mut result = scan_with_controls(&root, threads, cancelled)?;
                     result["fallback_reason"] = json!(reason);
                     Ok(result)
                 }
@@ -704,18 +739,40 @@ fn tool_result(id: &Value, result: Result<Value, String>) -> Value {
     };
     json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":v.to_string()}],"isError":failed}})
 }
+fn mcp_send(output: &std::sync::Mutex<io::Stdout>, value: &Value) -> Result<(), String> {
+    let mut output = output.lock().map_err(err)?;
+    writeln!(output, "{value}").map_err(err)?;
+    output.flush().map_err(err)
+}
+struct ActiveAnalysis {
+    id: Value,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: std::thread::JoinHandle<()>,
+}
 fn serve() -> Result<(), String> {
     let stdin = io::stdin();
-    let mut stdout = io::stdout().lock();
+    let stdout = std::sync::Arc::new(std::sync::Mutex::new(io::stdout()));
+    let mut active: Option<ActiveAnalysis> = None;
     let mut supports_elicitation = false;
     let mut pending: Option<(Value, PathBuf, Vec<u8>, String, String)> = None;
     let mut sequence = 0u64;
     for line in stdin.lock().lines() {
+        if active
+            .as_ref()
+            .is_some_and(|job| job.done.load(std::sync::atomic::Ordering::Acquire))
+            && let Some(job) = active.take()
+        {
+            let _ = job.handle.join();
+        }
         let line = line.map_err(err)?;
         let req: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(_) => {
-                writeln!(stdout, "{}", json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}})).map_err(err)?;
+                mcp_send(
+                    &stdout,
+                    &json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}),
+                )?;
                 continue;
             }
         };
@@ -731,12 +788,16 @@ fn serve() -> Result<(), String> {
                 } else {
                     Err("confirmation declined or invalid; nothing deleted".into())
                 };
-                writeln!(stdout, "{}", tool_result(&call_id, result)).map_err(err)?;
-                stdout.flush().map_err(err)?;
+                mcp_send(&stdout, &tool_result(&call_id, result))?;
             }
             continue;
         }
         if req["method"] == "notifications/cancelled" {
+            if let Some(job) = &active
+                && job.id == req["params"]["requestId"]
+            {
+                job.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             if pending
                 .as_ref()
                 .is_some_and(|(id, _, _, _, _)| *id == req["params"]["requestId"])
@@ -772,7 +833,46 @@ fn serve() -> Result<(), String> {
             "tools/call" => {
                 let args = &req["params"]["arguments"];
                 let name = req["params"]["name"].as_str().unwrap_or("");
-                if name == "apply" && supports_elicitation && pending.is_none() {
+                if active.is_some() && matches!(name, "tree" | "benchmark" | "plan" | "apply") {
+                    tool_result(
+                        id,
+                        Err("another analysis is running; retry after it finishes".into()),
+                    )
+                } else if matches!(name, "scan" | "search" | "recommend" | "duplicates") {
+                    if active.is_some() || pending.is_some() {
+                        tool_result(
+                            id,
+                            Err("another analysis or confirmation is running; retry after it finishes".into()),
+                        )
+                    } else {
+                        let (stop, progress) = tree::new_controls();
+                        let worker_stop = stop.clone();
+                        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        let worker_done = done.clone();
+                        let output = stdout.clone();
+                        let call_id = id.clone();
+                        let arguments = args.clone();
+                        let tool_name = name.to_owned();
+                        let handle = std::thread::spawn(move || {
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    mcp_jobs::run(&tool_name, &arguments, &worker_stop, &progress)
+                                }))
+                                .unwrap_or_else(|_| Err("analysis worker panicked".into()));
+                            worker_done.store(true, std::sync::atomic::Ordering::Release);
+                            if !worker_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                                let _ = mcp_send(&output, &tool_result(&call_id, result));
+                            }
+                        });
+                        active = Some(ActiveAnalysis {
+                            id: id.clone(),
+                            stop,
+                            done,
+                            handle,
+                        });
+                        continue;
+                    }
+                } else if name == "apply" && supports_elicitation && pending.is_none() {
                     let prepared = native_path::from_value(&args["plan"]).and_then(|path| {
                         let (data, plan) = read_checked_plan(&path)?;
                         Ok((path, data, plan))
@@ -784,8 +884,7 @@ fn serve() -> Result<(), String> {
                             let request_id = format!("filetree-confirm-{sequence}");
                             let request = json!({"jsonrpc":"2.0","id":request_id,"method":"elicitation/create","params":{"message":message,"requestedSchema":{"type":"object","properties":{"confirmation":{"type":"string","title":"Confirmation"}},"required":["confirmation"]}}});
                             pending = Some((id.clone(), path, data, token, request_id));
-                            writeln!(stdout, "{request}").map_err(err)?;
-                            stdout.flush().map_err(err)?;
+                            mcp_send(&stdout, &request)?;
                             continue;
                         }
                         Err(e) => tool_result(id, Err(e)),
@@ -794,11 +893,7 @@ fn serve() -> Result<(), String> {
                     let result = match name {
                         "volumes" => volumes::list_json(),
                         "capacity" => (|| { let path=native_path::from_value(&args["path"])?; volumes::capacity(&path) })(),
-                        "scan" => (|| { let path = native_path::from_value(&args["path"])?; let threads = if args.get("threads").is_some() { u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")? } else { 4 }; let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; scan_dispatch(&path, threads, engine) })(),
                         "benchmark" => (|| { let path=native_path::from_value(&args["path"])?; let n=|key: &str, default: u8| -> Result<u8, &str> { match args.get(key) { None => Ok(default), Some(v) => u8::try_from(v.as_u64().ok_or("invalid numeric argument")?).map_err(|_| "invalid numeric argument") } }; let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; benchmark::run(&path, n("threads",4)?, engine, n("iterations",3)?) })(),
-                        "search" => (|| { let path=native_path::from_value(&args["path"])?; let query=args["query"].as_str().ok_or("query required")?.to_owned(); let flag=|key:&str| -> Result<bool,&str> { match args.get(key) { None=>Ok(false), Some(v)=>v.as_bool().ok_or("invalid boolean") } }; let number=|key:&str,default:u64| -> Result<u64,&str> { match args.get(key) { None=>Ok(default), Some(v)=>v.as_u64().ok_or("invalid number") } }; let kind=match args.get("kind").and_then(Value::as_str) {None if args.get("kind").is_none()=>search::Kind::All,Some("all")=>search::Kind::All,Some("file")=>search::Kind::File,Some("directory")=>search::Kind::Directory,_=>return Err("invalid kind".into())}; let engine=match args.get("engine").and_then(Value::as_str) {None if args.get("engine").is_none()=>ScanEngine::Walk,Some("walk")=>ScanEngine::Walk,Some("mft")=>ScanEngine::Mft,Some("auto")=>ScanEngine::Auto,_=>return Err("invalid engine".into())}; let threads=u8::try_from(number("threads",4)?).map_err(|_|"invalid threads")?; let limit=usize::try_from(number("limit",100)?).map_err(|_|"invalid limit")?; if !(1..=10000).contains(&limit) {return Err("invalid limit".into());} let opts=search::Options {query,glob:flag("glob")?,path_match:flag("path_match")?,kind,min_bytes:number("min_bytes",0)?,limit}; let (stop,progress)=tree::new_controls(); let tree=scan_full_tree(&path,threads,engine,&stop,&progress)?; search::find(&tree,&opts).map(|report|report.json()) })(),
-                        "recommend" => (|| { let path=native_path::from_value(&args["path"])?; let threads=if args.get("threads").is_some() {u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")?} else {4}; let engine=match args.get("engine") {None=>ScanEngine::Walk,Some(Value::String(name)) if name=="walk"=>ScanEngine::Walk,Some(Value::String(name)) if name=="mft"=>ScanEngine::Mft,Some(Value::String(name)) if name=="auto"=>ScanEngine::Auto,_=>return Err("invalid engine".into())}; let (stop,progress)=tree::new_controls(); scan_full_tree(&path,threads,engine,&stop,&progress).map(|tree|recommend::analyze(&tree).json()) })(),
-                        "duplicates" => (|| { let path=native_path::from_value(&args["path"])?; let threads=if args.get("threads").is_some() {u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")?} else {4}; duplicates::find_path(&path,threads).map(|report|report.json()) })(),
                         "tree" => (|| { let path = native_path::from_value(&args["path"])?; let output = native_path::from_value(&args["output"])?; let threads = if args.get("threads").is_some() { u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")? } else { 4 }; { let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; { let format=match args.get("format").and_then(Value::as_str) {None if args.get("format").is_none()=>tree::ExportFormat::Jsonl,Some("jsonl")=>tree::ExportFormat::Jsonl,Some("csv")=>tree::ExportFormat::Csv,_=>return Err("invalid export format".into())}; tree::save_tree(&path, &output, threads, engine, format) } } })(),
                         "plan" => (|| { let paths = args["paths"].as_array().ok_or("paths required")?.iter().map(native_path::from_value).collect::<Result<Vec<_>,_>>()?; let out = native_path::from_value(&args["output"])?; { let mode = match args.get("mode") { None => CleanupMode::Recycle, Some(Value::String(name)) if name == "recycle" => CleanupMode::Recycle, Some(Value::String(name)) if name == "permanent" => CleanupMode::Permanent, _ => return Err("invalid cleanup mode".into()) }; save_plan_mode(&paths, &out, mode) } })(),
                         "apply" => Err("client must support human elicitation, and only one confirmation can be pending".into()),
@@ -811,8 +906,11 @@ fn serve() -> Result<(), String> {
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Method not found"}})
             }
         };
-        writeln!(stdout, "{response}").map_err(err)?;
-        stdout.flush().map_err(err)?;
+        mcp_send(&stdout, &response)?;
+    }
+    if let Some(job) = active {
+        job.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = job.handle.join();
     }
     Ok(())
 }

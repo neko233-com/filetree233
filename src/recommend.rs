@@ -58,6 +58,13 @@ fn markers(tree: &Snapshot, parent: u32) -> Markers {
     result
 }
 pub fn analyze(tree: &Snapshot) -> Report {
+    analyze_controlled(tree, &std::sync::atomic::AtomicBool::new(false))
+        .expect("uncancelled analysis")
+}
+pub fn analyze_controlled(
+    tree: &Snapshot,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<Report, String> {
     let mut report = Report {
         candidates: Vec::new(),
         total_candidates: 0,
@@ -78,6 +85,9 @@ pub fn analyze(tree: &Snapshot) -> Report {
         )>,
     >::new();
     for (id, node) in tree.nodes.iter().enumerate().skip(1) {
+        if id % 1024 == 0 && cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("recommendation cancelled".into());
+        }
         let parent = node.parent as usize;
         if inside_candidate[parent] {
             inside_candidate[id] = true;
@@ -208,7 +218,7 @@ pub fn analyze(tree: &Snapshot) -> Report {
     report
         .candidates
         .sort_by(|a, b| b.logical.cmp(&a.logical).then_with(|| a.path.cmp(&b.path)));
-    report
+    Ok(report)
 }
 impl Report {
     pub fn json(&self) -> Value {
