@@ -213,8 +213,12 @@ fn scan_index(
         .position(|c| *c == 0)
         .ok_or("invalid mount path")?;
     let mount = OsString::from_wide(&mount[..n]);
-    let mount_text = mount.to_string_lossy();
-    let display_mount = mount_text.strip_prefix(r"\\?\").unwrap_or(&mount_text);
+    // ntfs-mft currently converts mount-point paths to UTF-8 internally. Reject
+    // an unrepresentable mount rather than open a different, lossy path.
+    let mount_text = mount.to_str().ok_or(
+        "non-Unicode volume mount is unsupported by the MFT backend; use filesystem traversal",
+    )?;
+    let display_mount = mount_text.strip_prefix(r"\\?\").unwrap_or(mount_text);
     let b = display_mount.as_bytes();
     let volume = if b.len() == 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\' {
         ntfs_mft::Volume::from_drive_letter(b[0] as char).map_err(|e| e.to_string())?
@@ -238,14 +242,11 @@ fn scan_index(
         if entry.file_reference.get() == root_id {
             root_found = true;
         }
-        if entry.is_directory
-            && entry.file_reference.get() != root_id
-            && let Ok(name) = String::from_utf16(entry.file_name.as_utf16())
-        {
+        if entry.is_directory && entry.file_reference.get() != root_id {
             index.add_directory(Directory {
                 id: entry.file_reference.get(),
                 parent: entry.parent_reference.get(),
-                name,
+                name: OsString::from_wide(entry.file_name.as_utf16()),
                 reparse: entry.is_reparse_point,
             });
         }
@@ -265,12 +266,10 @@ fn scan_index(
         }
         let mut links = Vec::new();
         if entry.links.is_empty() {
-            if let Ok(name) = String::from_utf16(entry.file_name.as_utf16()) {
-                links.push(Link {
-                    parent: entry.parent_reference.get(),
-                    name,
-                });
-            }
+            links.push(Link {
+                parent: entry.parent_reference.get(),
+                name: OsString::from_wide(entry.file_name.as_utf16()),
+            });
         } else {
             for link in &entry.links {
                 if link.namespace == FileNameNamespace::Dos
@@ -281,12 +280,10 @@ fn scan_index(
                 {
                     continue;
                 }
-                if let Ok(name) = String::from_utf16(link.file_name.as_utf16()) {
-                    links.push(Link {
-                        parent: link.parent_reference.get(),
-                        name,
-                    });
-                }
+                links.push(Link {
+                    parent: link.parent_reference.get(),
+                    name: OsString::from_wide(link.file_name.as_utf16()),
+                });
             }
         }
         // Only materialize a full path when special allocation needs a Win32 query.

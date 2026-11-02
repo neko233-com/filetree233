@@ -289,7 +289,7 @@ impl ScanStats {
         );
     }
     fn into_value(self, path: &Path) -> Value {
-        json!({"path":path,"bytes":self.bytes,"allocated_attributed_bytes":self.allocated,"allocation_errors":self.allocation_errors,"files":self.files,"directories":self.directories,"complete":self.error_count == 0,"error_count":self.error_count,"errors":self.errors})
+        json!({"path":path.to_string_lossy(),"path_units":tree::raw_units(path.as_os_str()),"bytes":self.bytes,"allocated_attributed_bytes":self.allocated,"allocation_errors":self.allocation_errors,"files":self.files,"directories":self.directories,"complete":self.error_count == 0,"error_count":self.error_count,"errors":self.errors})
     }
 }
 fn count_file(
@@ -453,7 +453,7 @@ fn scan_with_threads(path: &Path, threads: u8) -> Result<Value, String> {
         .filter_map(|v| v["allocated_attributed_bytes"].as_u64())
         .fold(0u64, u64::saturating_add);
     Ok(
-        json!({"root":root,"engine":"filesystem_walk","threads":worker_count,"size_kind":"logical_bytes","allocation_kind":"unique_file_allocation_attributed_first_seen","total_allocated_bytes":total_allocated_bytes,"complete":entries.iter().all(|v| v["complete"] == true),"entries":entries}),
+        json!({"root":root.to_string_lossy(),"root_units":tree::raw_units(root.as_os_str()),"name_encoding":if cfg!(windows){"utf16"}else{"bytes"},"engine":"filesystem_walk","threads":worker_count,"size_kind":"logical_bytes","allocation_kind":"unique_file_allocation_attributed_first_seen","total_allocated_bytes":total_allocated_bytes,"complete":entries.iter().all(|v| v["complete"] == true),"entries":entries}),
     )
 }
 fn scan_full_tree(

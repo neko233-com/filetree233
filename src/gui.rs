@@ -62,6 +62,20 @@ fn install_system_font(ctx: &egui::Context) {
         }
     }
 }
+fn is_lossless_display_path(entry: &serde_json::Value) -> bool {
+    let Some(path) = entry["path"].as_str() else {
+        return false;
+    };
+    let Some(units) = entry["path_units"].as_array() else {
+        return false;
+    };
+    let raw = crate::tree::raw_units(std::ffi::OsStr::new(path));
+    raw.len() == units.len()
+        && raw
+            .iter()
+            .zip(units)
+            .all(|(a, b)| b.as_u64() == Some(u64::from(*a)))
+}
 fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
@@ -253,6 +267,13 @@ impl App {
             }
         });
     }
+    fn set_tree_path(&mut self, path: &std::path::Path) {
+        if let Some(text) = path.to_str() {
+            self.path = text.to_owned();
+        } else {
+            self.status = "This path cannot be represented in the text field; navigation remains in the current snapshot".into();
+        }
+    }
     fn begin_volumes(&mut self, ctx: &egui::Context) {
         if self.volume_rx.is_some() {
             return;
@@ -349,7 +370,12 @@ impl eframe::App for App {
         {
             match result {
                 Ok(ScanResult::Tree(tree)) => {
-                    self.path = tree.root.display().to_string();
+                    let root_representable = if let Some(text) = tree.root.to_str() {
+                        self.path = text.to_owned();
+                        true
+                    } else {
+                        false
+                    };
                     self.status = format!(
                         "{} tree: {} entries, logical {} bytes, allocated {} bytes{}",
                         tree.engine,
@@ -362,6 +388,10 @@ impl eframe::App for App {
                             " (incomplete)"
                         }
                     );
+                    if !root_representable {
+                        self.status
+                            .push_str("; root path cannot be represented in the text field");
+                    }
                     if let Some(reason) = &tree.fallback_reason {
                         self.status.push_str(&format!("; fallback: {reason}"));
                     }
@@ -445,7 +475,8 @@ impl eframe::App for App {
                     if let Some(tree) = &self.tree {
                         if let Some(parent) = tree.parent(self.tree_current) {
                             self.tree_current = parent;
-                            self.path = tree.path(parent).display().to_string();
+                            let path = tree.path(parent);
+                            self.set_tree_path(&path);
                         }
                     } else if let Some(p) = std::path::Path::new(&self.path).parent() {
                         self.path = p.display().to_string();
@@ -606,11 +637,15 @@ impl eframe::App for App {
                         continue;
                     }
                     let is_dir = entry["directories"].as_u64().unwrap_or(0) > 0;
+                    let lossless = is_lossless_display_path(entry);
                     ui.horizontal(|ui| {
                         {
                             let p = PathBuf::from(path);
                             let mut selected = self.selected.contains(&p);
-                            if ui.checkbox(&mut selected, "").changed() {
+                            if ui
+                                .add_enabled(lossless, egui::Checkbox::new(&mut selected, ""))
+                                .changed()
+                            {
                                 if selected {
                                     self.selected.push(p);
                                 } else {
@@ -627,10 +662,15 @@ impl eframe::App for App {
                         } else {
                             ui.colored_label(Color32::LIGHT_RED, "ERROR");
                         }
-                        if is_dir && ui.link(path).clicked() {
-                            navigate = Some(path.to_string());
-                        } else if !is_dir {
+                        if is_dir && lossless {
+                            if ui.link(path).clicked() {
+                                navigate = Some(path.to_string());
+                            }
+                        } else {
                             ui.label(path);
+                            if !lossless {
+                                ui.colored_label(Color32::YELLOW, "raw path requires full tree");
+                            }
                         }
                         if entry["complete"] == false {
                             ui.colored_label(
@@ -811,7 +851,7 @@ impl App {
             if self.expanded.insert(id) {
                 self.visible_dirty = true;
             }
-            self.path = tree.path(id).display().to_string();
+            self.set_tree_path(&tree.path(id));
         }
         self.tree = Some(tree);
     }
@@ -1144,5 +1184,16 @@ mod tests {
         }
         assert_eq!(app.path, root.to_str().unwrap());
         assert!(app.rx.is_none());
+    }
+    #[test]
+    fn summary_disables_lossy_paths() {
+        let valid = serde_json::json!({"path":"abc", "path_units":crate::tree::raw_units(std::ffi::OsStr::new("abc"))});
+        assert!(is_lossless_display_path(&valid));
+        let mut lossy = valid.clone();
+        lossy["path_units"] = serde_json::json!([97, 98, 255]);
+        assert!(!is_lossless_display_path(&lossy));
+        assert!(!is_lossless_display_path(
+            &serde_json::json!({"error":"unavailable"})
+        ));
     }
 }

@@ -1,19 +1,20 @@
 //! Aggregates NTFS record references without retaining one allocation per file.
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
 #[derive(Clone)]
 pub struct Directory {
     pub id: u64,
     pub parent: u64,
-    pub name: String,
+    pub name: OsString,
     pub reparse: bool,
 }
 #[derive(Clone)]
 pub struct Link {
     pub parent: u64,
-    pub name: String,
+    pub name: OsString,
 }
 #[derive(Default)]
 struct Total {
@@ -27,8 +28,8 @@ pub struct Index {
     root: u64,
     dirs: HashMap<u64, Directory>,
     owners: HashMap<u64, Option<u64>>,
-    names: HashMap<u64, String>,
-    rows: BTreeMap<String, Total>,
+    names: HashMap<u64, OsString>,
+    rows: BTreeMap<OsString, Total>,
     pub skipped: u64,
     allocation_unknown: u64,
     snapshot: Option<TreeBuilder>,
@@ -172,7 +173,10 @@ impl Index {
             .finish(root_path)
     }
     pub fn finish(self, root_path: &Path) -> Value {
-        let mut entries: Vec<_> = self.rows.into_iter().map(|(name,t)| json!({"path":root_path.join(name).to_string_lossy(),"bytes":t.logical,"allocated_attributed_bytes":t.allocated,"files":t.files,"directories":t.directories,"complete":false,"error_count":1,"errors":[if t.reparse { "MFT reparse point skipped" } else { "MFT scan is best effort; verify with filesystem traversal" }]})).collect();
+        let mut entries: Vec<_> = self.rows.into_iter().map(|(name,t)| {
+            let path = root_path.join(name);
+            json!({"path":path.to_string_lossy(),"path_units":crate::tree::raw_units(path.as_os_str()),"bytes":t.logical,"allocated_attributed_bytes":t.allocated,"files":t.files,"directories":t.directories,"complete":false,"error_count":1,"errors":[if t.reparse { "MFT reparse point skipped" } else { "MFT scan is best effort; verify with filesystem traversal" }]})
+        }).collect();
         entries.sort_by(|a, b| {
             b["bytes"]
                 .as_u64()
@@ -183,7 +187,7 @@ impl Index {
             .iter()
             .filter_map(|e| e["allocated_attributed_bytes"].as_u64())
             .fold(0u64, u64::saturating_add);
-        json!({"root":root_path.to_string_lossy(),"engine":"mft_fast","threads":1,"size_kind":"logical_bytes","allocation_kind":"unique_file_allocation_attributed_first_seen","total_allocated_bytes":total,"complete":false,"unresolved_cycles":self.skipped,"allocation_unknown":self.allocation_unknown,"entries":entries})
+        json!({"root":root_path.to_string_lossy(),"root_units":crate::tree::raw_units(root_path.as_os_str()),"name_encoding":if cfg!(windows){"utf16"}else{"bytes"},"engine":"mft_fast","threads":1,"size_kind":"logical_bytes","allocation_kind":"unique_file_allocation_attributed_first_seen","total_allocated_bytes":total,"complete":false,"unresolved_cycles":self.skipped,"allocation_unknown":self.allocation_unknown,"entries":entries})
     }
 }
 
@@ -207,7 +211,7 @@ impl TreeBuilder {
     fn add_node(
         &mut self,
         parent: u32,
-        name: &str,
+        name: &OsStr,
         is_dir: bool,
         reparse: bool,
         logical: u64,
@@ -368,6 +372,71 @@ mod tests {
             !paths
                 .iter()
                 .any(|p| p.ends_with("not-visible") || p.ends_with("cycle"))
+        );
+    }
+    #[test]
+    fn retains_raw_file_and_directory_names_in_tree_and_summary() {
+        #[cfg(unix)]
+        let (dirname, filename) = {
+            use std::os::unix::ffi::OsStringExt;
+            (
+                OsString::from_vec(vec![b'd', 0x80]),
+                OsString::from_vec(vec![b'f', 0x81]),
+            )
+        };
+        #[cfg(windows)]
+        let (dirname, filename) = {
+            use std::os::windows::ffi::OsStringExt;
+            (
+                OsString::from_wide(&[b'd' as u16, 0xd800]),
+                OsString::from_wide(&[b'f' as u16, 0xd801]),
+            )
+        };
+        let mut idx = Index::new(5);
+        idx.enable_snapshot();
+        idx.add_directory(Directory {
+            id: 10,
+            parent: 5,
+            name: dirname.clone(),
+            reparse: false,
+        });
+        idx.finish_directories();
+        idx.add_file(
+            &[Link {
+                parent: 10,
+                name: filename.clone(),
+            }],
+            9,
+            16,
+        );
+        let json = idx.finish_snapshot(Path::new("/demo"));
+        let dir = json.nodes.iter().position(|n| n.name == dirname).unwrap();
+        let file = json.nodes.iter().position(|n| n.name == filename).unwrap();
+        assert_eq!(json.nodes[file].parent, dir as u32);
+        assert_eq!(json.nodes[0].logical, 9);
+        let mut summary = Index::new(5);
+        summary.add_directory(Directory {
+            id: 10,
+            parent: 5,
+            name: dirname.clone(),
+            reparse: false,
+        });
+        summary.finish_directories();
+        summary.add_file(
+            &[Link {
+                parent: 10,
+                name: filename,
+            }],
+            9,
+            16,
+        );
+        let result = summary.finish(Path::new("/demo"));
+        let row = &result["entries"][0];
+        assert_eq!(
+            row["path_units"],
+            serde_json::json!(crate::tree::raw_units(
+                Path::new("/demo").join(dirname).as_os_str()
+            ))
         );
     }
 }

@@ -74,6 +74,13 @@ fn live_ntfs_volume_finds_created_demo_file() {
     fs::create_dir_all(demo.join("alpha/nested")).unwrap();
     fs::create_dir_all(demo.join("beta")).unwrap();
     fs::create_dir_all(demo.join("empty")).unwrap();
+    use std::os::windows::ffi::OsStringExt;
+    let odd_dir_name = std::ffi::OsString::from_wide(&[b'd' as u16, 0xd800]);
+    let odd_file_name = std::ffi::OsString::from_wide(&[b'f' as u16, 0xd801]);
+    let odd_dir = demo.join(&odd_dir_name);
+    fs::create_dir(&odd_dir).unwrap();
+    fs::write(odd_dir.join(&odd_file_name), b"raw-name-content").unwrap();
+
     fs::write(demo.join("alpha/nested/data"), vec![1u8; 32768]).unwrap();
     fs::hard_link(demo.join("alpha/nested/data"), demo.join("beta/hardlink")).unwrap();
     fs::write(demo.join("root-file"), vec![2u8; 8192]).unwrap();
@@ -133,6 +140,20 @@ fn live_ntfs_volume_finds_created_demo_file() {
     let mft = scan("mft");
     assert_eq!(mft["engine"], "mft_fast");
     assert_eq!(mft["complete"], false);
+    for summary in [&walk, &mft] {
+        let odd = summary["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| {
+                entry["path_units"]
+                    .as_array()
+                    .is_some_and(|units| units.iter().any(|unit| unit.as_u64() == Some(0xd800)))
+            })
+            .expect("raw directory missing from summary");
+        assert_eq!(odd["bytes"], 16);
+    }
+
     let row = |v: &Value, name: &str| {
         v["entries"]
             .as_array()
@@ -187,6 +208,17 @@ fn live_ntfs_volume_finds_created_demo_file() {
         .collect();
     assert_eq!(rows[0]["complete"], false);
     let entries = &rows[1..];
+    let odd_dir = entries
+        .iter()
+        .find(|entry| entry["name_units"] == serde_json::json!([b'd' as u16, 0xd800u16]))
+        .expect("raw directory missing from MFT tree");
+    let odd_file = entries
+        .iter()
+        .find(|entry| entry["name_units"] == serde_json::json!([b'f' as u16, 0xd801u16]))
+        .expect("raw file missing from MFT tree");
+    assert_eq!(odd_file["parent"], odd_dir["id"]);
+    assert_eq!(odd_file["logical_bytes"], 16);
+
     for name in [
         "alpha",
         "nested",
