@@ -83,6 +83,49 @@ struct Queue {
     active: usize,
     error: Option<String>,
 }
+// Limit temporary memory and publish child directories often enough for other
+// workers to start scanning while a large directory is still being enumerated.
+const TREE_BATCH_SIZE: usize = 64;
+fn publish_batch(
+    queue: &std::sync::Mutex<Queue>,
+    wake: &std::sync::Condvar,
+    progress: &AtomicU64,
+    parent: u32,
+    batch: &mut Vec<(Node, Option<PathBuf>)>,
+) -> bool {
+    if batch.is_empty() {
+        return true;
+    }
+    let mut q = queue.lock().expect("tree queue poisoned");
+    if q.error.is_some() {
+        batch.clear();
+        return false;
+    }
+    let mut new_jobs = 0;
+    let count = batch.len() as u64;
+    for (mut node, directory) in batch.drain(..) {
+        let id = match u32::try_from(q.nodes.len()) {
+            Ok(id) if id != NONE => id,
+            _ => {
+                q.error = Some("tree exceeds supported number of entries".into());
+                wake.notify_all();
+                return false;
+            }
+        };
+        node.next_sibling = q.nodes[parent as usize].first_child;
+        q.nodes[parent as usize].first_child = id;
+        q.nodes.push(node);
+        if let Some(path) = directory {
+            q.jobs.push_back((path, id));
+            new_jobs += 1;
+        }
+    }
+    progress.fetch_add(count, Ordering::Relaxed);
+    if new_jobs > 0 {
+        wake.notify_all();
+    }
+    true
+}
 pub fn scan(
     path: &Path,
     threads: u8,
@@ -111,6 +154,7 @@ pub fn scan(
     std::thread::scope(|scope| {
         for _ in 0..threads {
             scope.spawn(|| {
+                let mut batch = Vec::with_capacity(TREE_BATCH_SIZE);
                 loop {
                     let (dir, parent) = {
                         let mut q = queue.lock().expect("tree queue poisoned");
@@ -187,25 +231,14 @@ pub fn scan(
                                         node.error = Some(e.to_string());
                                     }
                                 }
-                                let mut q = queue.lock().expect("tree queue poisoned");
-                                let id = match u32::try_from(q.nodes.len()) {
-                                    Ok(id) if id != NONE => id,
-                                    _ => {
-                                        q.error =
-                                            Some("tree exceeds supported number of entries".into());
-                                        wake.notify_all();
-                                        break;
-                                    }
-                                };
-                                node.next_sibling = q.nodes[parent as usize].first_child;
-                                q.nodes[parent as usize].first_child = id;
-                                q.nodes.push(node);
-                                if descend {
-                                    q.jobs.push_back((path, id));
-                                    wake.notify_one();
+                                batch.push((node, descend.then_some(path)));
+                                if batch.len() == TREE_BATCH_SIZE
+                                    && !publish_batch(&queue, &wake, progress, parent, &mut batch)
+                                {
+                                    break;
                                 }
-                                progress.fetch_add(1, Ordering::Relaxed);
                             }
+                            publish_batch(&queue, &wake, progress, parent, &mut batch);
                         }
                         Err(e) => {
                             let mut q = queue.lock().expect("tree queue poisoned");
@@ -519,6 +552,41 @@ mod tests {
         assert_eq!(rows[2]["name_units"], serde_json::json!([0xd800, 120]));
         #[cfg(unix)]
         assert_eq!(rows[2]["name_units"], serde_json::json!([255, 120]));
+    }
+    #[test]
+    fn batched_scan_preserves_every_child_and_parent() {
+        let root = std::env::temp_dir().join(format!(
+            "filetree233-tree-batch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        for i in 0..130 {
+            let dir = root.join(format!("dir-{i:03}"));
+            fs::create_dir(&dir).unwrap();
+            fs::write(dir.join("file"), b"hello").unwrap();
+        }
+        for threads in [1, 8] {
+            let (stop, progress) = new_controls();
+            let tree = scan(&root, threads, &stop, &progress).unwrap();
+            assert_eq!(tree.nodes.len(), 261);
+            assert_eq!(tree.nodes[0].directories, 131);
+            assert_eq!(tree.nodes[0].files, 130);
+            assert_eq!(tree.nodes[0].logical, 650);
+            assert_eq!(progress.load(Ordering::Relaxed), 260);
+            assert!(tree.nodes[0].complete);
+            for dir in tree.children(0) {
+                let files = tree.children(dir);
+                assert_eq!(files.len(), 1);
+                assert_eq!(tree.nodes[files[0] as usize].name, "file");
+                assert_eq!(tree.nodes[files[0] as usize].parent, dir);
+            }
+            assert_eq!(tree.children(0).len(), 130);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn snapshot_keeps_tree_and_aggregates_hard_links() {
