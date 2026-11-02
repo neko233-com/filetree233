@@ -40,17 +40,17 @@ fn markers(tree: &Snapshot, parent: u32) -> Markers {
             continue;
         }
         if node.is_dir {
-            if node.name == "Assets" {
+            if node.name.as_ref() == "Assets" {
                 result.assets = true;
             }
-            if node.name == "ProjectSettings" {
+            if node.name.as_ref() == "ProjectSettings" {
                 result.project_settings = true;
             }
         } else if node.files == 1 {
-            if node.name == "Cargo.toml" {
+            if node.name.as_ref() == "Cargo.toml" {
                 result.cargo = true;
             }
-            if node.name == "package.json" {
+            if node.name.as_ref() == "package.json" {
                 result.package = true;
             }
         }
@@ -86,7 +86,7 @@ pub fn analyze(tree: &Snapshot) -> Report {
         if !node.is_dir || node.error.is_some() {
             continue;
         }
-        let name = node.name.as_os_str();
+        let name = node.name.as_ref();
         let needs_markers = name == "target"
             || name == "node_modules"
             || name == ".next"
@@ -150,7 +150,7 @@ pub fn analyze(tree: &Snapshot) -> Report {
                 "mypy cache directory",
                 "May contain analysis state or unexpected files.",
             )),
-            Some("caches") if tree.nodes[parent].name == ".gradle" => Some((
+            Some("caches") if tree.nodes[parent].name.as_ref() == ".gradle" => Some((
                 "gradle_caches",
                 "Gradle caches directory",
                 "Rebuilding may require network access and significant time.",

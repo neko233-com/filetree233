@@ -340,7 +340,7 @@ impl TreeBuilder {
             let mut cursor = parent;
             while cursor != 0 {
                 let node = &self.nodes[cursor as usize];
-                parts.push(node.name.as_os_str());
+                parts.push(node.name.as_ref());
                 cursor = node.parent;
             }
             let mut path = root.to_path_buf();
@@ -435,7 +435,7 @@ mod tests {
         assert_eq!(tree.nodes[0].directories, 2);
         assert_eq!(tree.nodes[0].files, 0);
         for name in ["junction", "root-link", "nested-link"] {
-            let node = tree.nodes.iter().find(|n| n.name == name).unwrap();
+            let node = tree.nodes.iter().find(|n| n.name.as_ref() == name).unwrap();
             assert!(!node.is_dir && !node.complete);
             assert_eq!(node.files, 0);
             assert_eq!(node.directories, 0);
@@ -444,7 +444,7 @@ mod tests {
                 Some("MFT reparse point skipped")
             );
         }
-        assert!(!tree.nodes.iter().any(|n| n.name == "hidden-link"));
+        assert!(!tree.nodes.iter().any(|n| n.name.as_ref() == "hidden-link"));
         let mut idx = Index::new(5);
         idx.add_directory(dir(10, 5, "a", false));
         idx.add_directory(dir(11, 10, "junction", true));
@@ -469,7 +469,7 @@ mod tests {
         assert_eq!(tree.nodes[0].logical, 200);
         assert_eq!(tree.nodes[0].allocated, 0);
         for name in ["one", "alias"] {
-            let node = tree.nodes.iter().find(|n| n.name == name).unwrap();
+            let node = tree.nodes.iter().find(|n| n.name.as_ref() == name).unwrap();
             assert!(!node.complete);
             assert_eq!(
                 node.error.as_deref().map(String::as_str),
@@ -657,8 +657,16 @@ mod tests {
             16,
         );
         let json = idx.finish_snapshot(Path::new("/demo"));
-        let dir = json.nodes.iter().position(|n| n.name == dirname).unwrap();
-        let file = json.nodes.iter().position(|n| n.name == filename).unwrap();
+        let dir = json
+            .nodes
+            .iter()
+            .position(|n| n.name.as_ref() == dirname.as_os_str())
+            .unwrap();
+        let file = json
+            .nodes
+            .iter()
+            .position(|n| n.name.as_ref() == filename.as_os_str())
+            .unwrap();
         assert_eq!(json.nodes[file].parent, dir as u32);
         assert_eq!(json.nodes[0].logical, 9);
         let mut summary = Index::new(5);

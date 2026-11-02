@@ -2,7 +2,7 @@
 use crate::{allocation, is_reparse};
 use std::{
     collections::HashSet,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -14,7 +14,7 @@ pub(crate) const NONE: u32 = u32::MAX;
 
 #[derive(Debug)]
 pub struct Node {
-    pub name: OsString,
+    pub name: Box<OsStr>,
     pub parent: u32,
     pub first_child: u32,
     pub next_sibling: u32,
@@ -32,7 +32,7 @@ pub struct Node {
 impl Node {
     pub(crate) fn new(name: OsString, parent: u32) -> Self {
         Self {
-            name,
+            name: name.into_boxed_os_str(),
             parent,
             first_child: NONE,
             next_sibling: NONE,
@@ -59,7 +59,7 @@ impl Snapshot {
         let mut cursor = id;
         while cursor != 0 {
             let n = &self.nodes[cursor as usize];
-            parts.push(n.name.as_os_str());
+            parts.push(n.name.as_ref());
             cursor = n.parent;
         }
         let mut path = self.root.clone();
@@ -594,7 +594,7 @@ mod tests {
             for dir in tree.children(0) {
                 let files = tree.children(dir);
                 assert_eq!(files.len(), 1);
-                assert_eq!(tree.nodes[files[0] as usize].name, "file");
+                assert_eq!(tree.nodes[files[0] as usize].name.as_ref(), "file");
                 assert_eq!(tree.nodes[files[0] as usize].parent, dir);
             }
             assert_eq!(tree.children(0).len(), 130);
@@ -635,7 +635,7 @@ mod tests {
         let a = tree
             .children(0)
             .into_iter()
-            .find(|id| tree.nodes[*id as usize].name == "a")
+            .find(|id| tree.nodes[*id as usize].name.as_ref() == "a")
             .unwrap();
         let nested = tree.children(a)[0];
         let file = tree.children(nested)[0];
