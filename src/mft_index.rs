@@ -55,6 +55,14 @@ impl Index {
     }
     pub fn finish_directories(&mut self) {
         let ids: Vec<u64> = self.dirs.keys().copied().collect();
+        if let Some(mut tree) = self.snapshot.take() {
+            let mut excluded = HashSet::new();
+            for id in ids {
+                tree.add_directory_chain(id, &self.dirs, &mut excluded);
+            }
+            self.snapshot = Some(tree);
+            return;
+        }
         for id in &ids {
             let d = &self.dirs[id];
             if d.parent == self.root && !d.name.is_empty() {
@@ -69,13 +77,6 @@ impl Index {
             {
                 self.rows.entry(name.clone()).or_default().directories += 1;
             }
-        }
-        if self.snapshot.is_some() {
-            let mut tree = self.snapshot.take().unwrap();
-            for id in ids {
-                tree.add_directory_chain(id, &self.dirs);
-            }
-            self.snapshot = Some(tree);
         }
     }
     fn owner(&mut self, id: u64) -> Option<u64> {
@@ -114,6 +115,9 @@ impl Index {
         result
     }
     pub fn file_path(&mut self, root_path: &Path, links: &[Link]) -> Option<std::path::PathBuf> {
+        if let Some(tree) = &self.snapshot {
+            return tree.file_path(root_path, links);
+        }
         for link in links {
             if link.parent == self.root {
                 return Some(root_path.join(&link.name));
@@ -146,6 +150,7 @@ impl Index {
     pub fn add_file(&mut self, links: &[Link], logical: u64, allocated: u64) {
         if let Some(tree) = &mut self.snapshot {
             tree.add_file(links, logical, allocated);
+            return;
         }
         let mut assigned = false;
         for link in links {
@@ -233,29 +238,62 @@ impl TreeBuilder {
         self.nodes.push(node);
         id
     }
-    fn add_directory_chain(&mut self, id: u64, dirs: &HashMap<u64, Directory>) {
+    fn add_directory_chain(
+        &mut self,
+        id: u64,
+        dirs: &HashMap<u64, Directory>,
+        excluded: &mut HashSet<u64>,
+    ) {
         let mut chain = Vec::new();
         let mut seen = HashSet::new();
         let mut cursor = id;
         while !self.ids.contains_key(&cursor) {
-            if !seen.insert(cursor) {
+            if excluded.contains(&cursor) || !seen.insert(cursor) {
+                excluded.extend(chain);
                 return;
             }
             let Some(d) = dirs.get(&cursor) else {
+                excluded.extend(chain);
                 return;
             };
             chain.push(cursor);
             cursor = d.parent;
         }
         let mut parent = self.ids[&cursor];
-        for id in chain.into_iter().rev() {
+        while let Some(id) = chain.pop() {
             if self.nodes[parent as usize].error.as_deref() == Some("MFT reparse point skipped") {
+                excluded.insert(id);
+                excluded.extend(chain);
                 return;
             }
             let d = &dirs[&id];
             parent = self.add_node(parent, &d.name, true, d.reparse, 0, 0);
             self.ids.insert(id, parent);
         }
+    }
+    fn file_path(&self, root: &Path, links: &[Link]) -> Option<std::path::PathBuf> {
+        for link in links {
+            let Some(&parent) = self.ids.get(&link.parent) else {
+                continue;
+            };
+            if self.nodes[parent as usize].error.as_deref() == Some("MFT reparse point skipped") {
+                continue;
+            }
+            let mut parts = Vec::new();
+            let mut cursor = parent;
+            while cursor != 0 {
+                let node = &self.nodes[cursor as usize];
+                parts.push(node.name.as_os_str());
+                cursor = node.parent;
+            }
+            let mut path = root.to_path_buf();
+            for part in parts.into_iter().rev() {
+                path.push(part);
+            }
+            path.push(&link.name);
+            return Some(path);
+        }
+        None
     }
     fn add_file(&mut self, links: &[Link], logical: u64, allocated: u64) {
         let mut assigned = false;
@@ -355,7 +393,20 @@ mod tests {
             idx.add_directory(d);
         }
         idx.finish_directories();
+        assert!(idx.rows.is_empty() && idx.owners.is_empty() && idx.names.is_empty());
+        assert_eq!(
+            idx.file_path(Path::new("/demo"), &[link(31, "ignored"), link(11, "one")]),
+            Some(Path::new("/demo").join("alpha/nested/one"))
+        );
+        assert_eq!(
+            idx.file_path(
+                Path::new("/demo"),
+                &[link(30, "ignored"), link(31, "ignored"), link(40, "cycle")]
+            ),
+            None
+        );
         idx.add_file(&[link(11, "one"), link(20, "alias")], 100, 128);
+        assert!(idx.rows.is_empty() && idx.owners.is_empty());
         idx.add_file(&[link(31, "not-visible")], 999, 1024);
         let tree = idx.finish_snapshot(Path::new("/demo"));
         assert!(!tree.nodes[0].complete);
@@ -437,6 +488,49 @@ mod tests {
             serde_json::json!(crate::tree::raw_units(
                 Path::new("/demo").join(dirname).as_os_str()
             ))
+        );
+    }
+    #[test]
+    #[ignore = "explicit synthetic performance benchmark"]
+    fn benchmark_snapshot_index() {
+        let mut idx = Index::new(5);
+        idx.enable_snapshot();
+        for id in 10..1010 {
+            idx.add_directory(dir(id, 5, &format!("local-{id}"), false));
+        }
+        for id in 0..64 {
+            idx.add_directory(dir(
+                100_000 + id,
+                if id == 0 { 999_999 } else { 100_000 + id - 1 },
+                &format!("outside-depth-{id}"),
+                false,
+            ));
+        }
+        for id in 0..50_000 {
+            idx.add_directory(dir(200_000 + id, 100_063, &format!("outside-{id}"), false));
+        }
+        let start = std::time::Instant::now();
+        idx.finish_directories();
+        let dirs_time = start.elapsed();
+        for id in 0..20_000 {
+            let parent = if id % 2 == 0 {
+                10 + (id % 1000)
+            } else {
+                200_000 + (id % 50_000)
+            };
+            let links = [link(parent, &format!("file-{id}"))];
+            if id % 10 == 0 {
+                let _ = idx.file_path(Path::new("/demo"), &links);
+            }
+            idx.add_file(&links, 100, 128);
+        }
+        let snapshot = idx.finish_snapshot(Path::new("/demo"));
+        assert_eq!(snapshot.nodes[0].files, 10_000);
+        eprintln!(
+            "synthetic_mft_directories_ms={} total_ms={} nodes={}",
+            dirs_time.as_millis(),
+            start.elapsed().as_millis(),
+            snapshot.nodes.len()
         );
     }
 }
