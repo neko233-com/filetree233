@@ -347,7 +347,7 @@ pub fn save_tree(
         .map_err(|e| e.to_string())?;
     snapshot.write_jsonl(&mut file)?;
     Ok(
-        serde_json::json!({"output":destination.to_string_lossy(),"entries":snapshot.nodes.len(),"engine":snapshot.engine,"fallback_reason":snapshot.fallback_reason,"complete":snapshot.nodes[0].complete,"logical_bytes":snapshot.nodes[0].logical,"allocated_bytes":snapshot.nodes[0].allocated}),
+        serde_json::json!({"output":destination.to_string_lossy(),"output_path":crate::native_path::value(&destination),"entries":snapshot.nodes.len(),"engine":snapshot.engine,"fallback_reason":snapshot.fallback_reason,"complete":snapshot.nodes[0].complete,"logical_bytes":snapshot.nodes[0].logical,"allocated_bytes":snapshot.nodes[0].allocated}),
     )
 }
 

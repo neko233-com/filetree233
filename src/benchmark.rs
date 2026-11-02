@@ -82,6 +82,6 @@ pub fn run(path: &Path, threads: u8, engine: ScanEngine, iterations: u8) -> Resu
         durations[durations.len() / 2]
     };
     Ok(
-        json!({"root":path.to_string_lossy(),"requested_engine":engine_name,"threads":threads,"iterations":iterations,"scan_median_ms":median,"runs":runs,"note":"Each run is a separate process; filesystem caches are not cleared. Peak memory includes runtime and tree, not just scan allocations."}),
+        json!({"root":path.to_string_lossy(),"root_path":crate::native_path::value(path),"requested_engine":engine_name,"threads":threads,"iterations":iterations,"scan_median_ms":median,"runs":runs,"note":"Each run is a separate process; filesystem caches are not cleared. Peak memory includes runtime and tree, not just scan allocations."}),
     )
 }

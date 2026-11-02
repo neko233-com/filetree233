@@ -5,6 +5,7 @@ mod gui;
 mod mft;
 #[cfg(any(windows, test))]
 mod mft_index;
+mod native_path;
 mod plan_fingerprint;
 mod recommend;
 mod recycle;
@@ -131,6 +132,7 @@ enum Command {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Summary {
+    #[serde(with = "native_path")]
     path: PathBuf,
     bytes: u64,
     allocated_attributed_bytes: u64,
@@ -547,7 +549,7 @@ fn make_plan(paths: &[PathBuf], output: &Path) -> Result<Plan, String> {
             .ok_or("allocation overflow")
     })?;
     Ok(Plan {
-        version: 4,
+        version: 5,
         mode: Some(CleanupMode::Permanent),
         targets,
         total_bytes,
@@ -568,13 +570,13 @@ fn save_plan_mode(paths: &[PathBuf], output: &Path, mode: CleanupMode) -> Result
         .open(output)
         .map_err(err)?;
     f.write_all(&data).map_err(err)?;
-    Ok(json!({"plan_file":output,"plan":plan}))
+    Ok(json!({"plan_file":native_path::value(output),"plan":plan}))
 }
 fn read_checked_plan(path: &Path) -> Result<(Vec<u8>, Plan), String> {
     let data = fs::read(path).map_err(err)?;
     let plan: Plan = serde_json::from_slice(&data).map_err(err)?;
-    if plan.version != 4 || plan.mode.is_none() || plan.targets.is_empty() {
-        return Err("unsupported or incomplete plan; create a new version 4 plan".into());
+    if !matches!(plan.version, 4 | 5) || plan.mode.is_none() || plan.targets.is_empty() {
+        return Err("unsupported or incomplete plan; create a new plan".into());
     }
     let paths: Vec<_> = plan.targets.iter().map(|s| s.path.clone()).collect();
     let current = make_plan(&paths, path)?;
@@ -606,7 +608,7 @@ fn plan_description(data: &[u8], plan: &Plan) -> (String, String) {
     for s in &plan.targets {
         message.push_str(&format!(
             "{} | {} bytes logical | {} bytes allocated | {} files | {} directories\n",
-            s.path.display(),
+            native_path::value(&s.path),
             s.bytes,
             s.allocated_attributed_bytes,
             s.files,
@@ -648,7 +650,7 @@ fn delete_checked(path: &Path, expected_data: &[u8]) -> Result<Value, String> {
         deleted.push(s.path.clone());
     }
     Ok(
-        json!({"processed":deleted,"mode":plan.mode.unwrap_or(CleanupMode::Permanent),"planned_logical_bytes":plan.total_bytes,"planned_allocated_attributed_bytes":plan.total_allocated_bytes}),
+        json!({"processed":deleted.iter().map(|path| native_path::value(path)).collect::<Vec<_>>(),"mode":plan.mode.unwrap_or(CleanupMode::Permanent),"planned_logical_bytes":plan.total_bytes,"planned_allocated_attributed_bytes":plan.total_allocated_bytes}),
     )
 }
 fn apply(path: &Path) -> Result<(), String> {
@@ -728,27 +730,23 @@ fn serve() -> Result<(), String> {
             "ping" => json!({"jsonrpc":"2.0","id":id,"result":{}}),
             "tools/list" => json!({"jsonrpc":"2.0","id":id,"result":{"tools":[
                 {"name":"volumes","description":"List detected mounted volumes and available capacity.","inputSchema":{"type":"object","properties":{}}},
-                {"name":"capacity","description":"Query filesystem capacity at an explicit path.","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},
-                {"name":"scan","description":"Analyze immediate children with optional parallel workers, reporting logical bytes, attributed allocation and errors.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path"]}},
-                {"name":"benchmark","description":"Measure full-tree scan time and peak memory in separate local processes; no deletion.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32},"iterations":{"type":"integer","minimum":1,"maximum":10},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path"]}},
-                {"name":"recommend","description":"Suggest cache and build directories with reasons and risks; never selects or deletes.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path"]}},
-                {"name":"duplicates","description":"Find content-verified duplicate files; hard links are aliases and no deletion occurs.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32}},"required":["path"]}},
-                {"name":"tree","description":"Scan a full filesystem tree and write a new JSONL snapshot outside the scanned directory.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"output":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path","output"]}},
-                {"name":"plan","description":"Create a cleanup plan for explicitly selected files and directories; no deletion.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"},"minItems":1},"output":{"type":"string"},"mode":{"type":"string","enum":["recycle","permanent"],"default":"recycle"}},"required":["paths","output"]}},
-                {"name":"apply","description":"Apply the plan's recycle or permanent mode after client-mediated human confirmation and revalidation.","annotations":{"destructiveHint":true,"openWorldHint":false},"inputSchema":{"type":"object","properties":{"plan":{"type":"string"}},"required":["plan"]}}
+                {"name":"capacity","description":"Query filesystem capacity at an explicit path.","inputSchema":{"type":"object","properties":{"path":{"anyOf":[{"type":"string"},{"type":"object","properties":{"encoding":{"type":"string","enum":["utf16","bytes"]},"units":{"type":"array","items":{"type":"integer","minimum":0,"maximum":65535}}},"required":["encoding","units"],"additionalProperties":false}]}},"required":["path"]}},
+                {"name":"scan","description":"Analyze immediate children with optional parallel workers, reporting logical bytes, attributed allocation and errors.","inputSchema":{"type":"object","properties":{"path":{"anyOf":[{"type":"string"},{"type":"object","properties":{"encoding":{"type":"string","enum":["utf16","bytes"]},"units":{"type":"array","items":{"type":"integer","minimum":0,"maximum":65535}}},"required":["encoding","units"],"additionalProperties":false}]},"threads":{"type":"integer","minimum":1,"maximum":32},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path"]}},
+                {"name":"benchmark","description":"Measure full-tree scan time and peak memory in separate local processes; no deletion.","inputSchema":{"type":"object","properties":{"path":{"anyOf":[{"type":"string"},{"type":"object","properties":{"encoding":{"type":"string","enum":["utf16","bytes"]},"units":{"type":"array","items":{"type":"integer","minimum":0,"maximum":65535}}},"required":["encoding","units"],"additionalProperties":false}]},"threads":{"type":"integer","minimum":1,"maximum":32},"iterations":{"type":"integer","minimum":1,"maximum":10},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path"]}},
+                {"name":"recommend","description":"Suggest cache and build directories with reasons and risks; never selects or deletes.","inputSchema":{"type":"object","properties":{"path":{"anyOf":[{"type":"string"},{"type":"object","properties":{"encoding":{"type":"string","enum":["utf16","bytes"]},"units":{"type":"array","items":{"type":"integer","minimum":0,"maximum":65535}}},"required":["encoding","units"],"additionalProperties":false}]},"threads":{"type":"integer","minimum":1,"maximum":32},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path"]}},
+                {"name":"duplicates","description":"Find content-verified duplicate files; hard links are aliases and no deletion occurs.","inputSchema":{"type":"object","properties":{"path":{"anyOf":[{"type":"string"},{"type":"object","properties":{"encoding":{"type":"string","enum":["utf16","bytes"]},"units":{"type":"array","items":{"type":"integer","minimum":0,"maximum":65535}}},"required":["encoding","units"],"additionalProperties":false}]},"threads":{"type":"integer","minimum":1,"maximum":32}},"required":["path"]}},
+                {"name":"tree","description":"Scan a full filesystem tree and write a new JSONL snapshot outside the scanned directory.","inputSchema":{"type":"object","properties":{"path":{"anyOf":[{"type":"string"},{"type":"object","properties":{"encoding":{"type":"string","enum":["utf16","bytes"]},"units":{"type":"array","items":{"type":"integer","minimum":0,"maximum":65535}}},"required":["encoding","units"],"additionalProperties":false}]},"output":{"anyOf":[{"type":"string"},{"type":"object","properties":{"encoding":{"type":"string","enum":["utf16","bytes"]},"units":{"type":"array","items":{"type":"integer","minimum":0,"maximum":65535}}},"required":["encoding","units"],"additionalProperties":false}]},"threads":{"type":"integer","minimum":1,"maximum":32},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path","output"]}},
+                {"name":"plan","description":"Create a cleanup plan for explicitly selected files and directories; no deletion.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"anyOf":[{"type":"string"},{"type":"object","properties":{"encoding":{"type":"string","enum":["utf16","bytes"]},"units":{"type":"array","items":{"type":"integer","minimum":0,"maximum":65535}}},"required":["encoding","units"],"additionalProperties":false}]},"minItems":1},"output":{"anyOf":[{"type":"string"},{"type":"object","properties":{"encoding":{"type":"string","enum":["utf16","bytes"]},"units":{"type":"array","items":{"type":"integer","minimum":0,"maximum":65535}}},"required":["encoding","units"],"additionalProperties":false}]},"mode":{"type":"string","enum":["recycle","permanent"],"default":"recycle"}},"required":["paths","output"]}},
+                {"name":"apply","description":"Apply the plan's recycle or permanent mode after client-mediated human confirmation and revalidation.","annotations":{"destructiveHint":true,"openWorldHint":false},"inputSchema":{"type":"object","properties":{"plan":{"anyOf":[{"type":"string"},{"type":"object","properties":{"encoding":{"type":"string","enum":["utf16","bytes"]},"units":{"type":"array","items":{"type":"integer","minimum":0,"maximum":65535}}},"required":["encoding","units"],"additionalProperties":false}]}},"required":["plan"]}}
             ]}}),
             "tools/call" => {
                 let args = &req["params"]["arguments"];
                 let name = req["params"]["name"].as_str().unwrap_or("");
                 if name == "apply" && supports_elicitation && pending.is_none() {
-                    let prepared = args["plan"]
-                        .as_str()
-                        .ok_or("plan required".to_string())
-                        .and_then(|p| {
-                            let path = PathBuf::from(p);
-                            let (data, plan) = read_checked_plan(&path)?;
-                            Ok((path, data, plan))
-                        });
+                    let prepared = native_path::from_value(&args["plan"]).and_then(|path| {
+                        let (data, plan) = read_checked_plan(&path)?;
+                        Ok((path, data, plan))
+                    });
                     match prepared {
                         Ok((path, data, plan)) => {
                             let (message, token) = plan_description(&data, &plan);
@@ -765,13 +763,13 @@ fn serve() -> Result<(), String> {
                 } else {
                     let result = match name {
                         "volumes" => volumes::list_json(),
-                        "capacity" => (|| { let path=args["path"].as_str().ok_or("path required")?; volumes::capacity(Path::new(path)) })(),
-                        "scan" => (|| { let path = args["path"].as_str().ok_or("path required")?; let threads = if args.get("threads").is_some() { u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")? } else { 4 }; let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; scan_dispatch(Path::new(path), threads, engine) })(),
-                        "benchmark" => (|| { let path=args["path"].as_str().ok_or("path required")?; let n=|key: &str, default: u8| -> Result<u8, &str> { match args.get(key) { None => Ok(default), Some(v) => u8::try_from(v.as_u64().ok_or("invalid numeric argument")?).map_err(|_| "invalid numeric argument") } }; let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; benchmark::run(Path::new(path), n("threads",4)?, engine, n("iterations",3)?) })(),
-                        "recommend" => (|| { let path=args["path"].as_str().ok_or("path required")?; let threads=if args.get("threads").is_some() {u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")?} else {4}; let engine=match args.get("engine") {None=>ScanEngine::Walk,Some(Value::String(name)) if name=="walk"=>ScanEngine::Walk,Some(Value::String(name)) if name=="mft"=>ScanEngine::Mft,Some(Value::String(name)) if name=="auto"=>ScanEngine::Auto,_=>return Err("invalid engine".into())}; let (stop,progress)=tree::new_controls(); scan_full_tree(Path::new(path),threads,engine,&stop,&progress).map(|tree|recommend::analyze(&tree).json()) })(),
-                        "duplicates" => (|| { let path=args["path"].as_str().ok_or("path required")?; let threads=if args.get("threads").is_some() {u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")?} else {4}; duplicates::find_path(Path::new(path),threads).map(|report|report.json()) })(),
-                        "tree" => (|| { let path = args["path"].as_str().ok_or("path required")?; let output = args["output"].as_str().ok_or("output required")?; let threads = if args.get("threads").is_some() { u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")? } else { 4 }; { let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; tree::save_tree(Path::new(path), Path::new(output), threads, engine) } })(),
-                        "plan" => (|| { let paths = args["paths"].as_array().ok_or("paths required")?.iter().map(|v| v.as_str().map(PathBuf::from).ok_or("invalid path")).collect::<Result<Vec<_>,_>>()?; let out = args["output"].as_str().ok_or("output required")?; { let mode = match args.get("mode") { None => CleanupMode::Recycle, Some(Value::String(name)) if name == "recycle" => CleanupMode::Recycle, Some(Value::String(name)) if name == "permanent" => CleanupMode::Permanent, _ => return Err("invalid cleanup mode".into()) }; save_plan_mode(&paths, Path::new(out), mode) } })(),
+                        "capacity" => (|| { let path=native_path::from_value(&args["path"])?; volumes::capacity(&path) })(),
+                        "scan" => (|| { let path = native_path::from_value(&args["path"])?; let threads = if args.get("threads").is_some() { u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")? } else { 4 }; let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; scan_dispatch(&path, threads, engine) })(),
+                        "benchmark" => (|| { let path=native_path::from_value(&args["path"])?; let n=|key: &str, default: u8| -> Result<u8, &str> { match args.get(key) { None => Ok(default), Some(v) => u8::try_from(v.as_u64().ok_or("invalid numeric argument")?).map_err(|_| "invalid numeric argument") } }; let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; benchmark::run(&path, n("threads",4)?, engine, n("iterations",3)?) })(),
+                        "recommend" => (|| { let path=native_path::from_value(&args["path"])?; let threads=if args.get("threads").is_some() {u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")?} else {4}; let engine=match args.get("engine") {None=>ScanEngine::Walk,Some(Value::String(name)) if name=="walk"=>ScanEngine::Walk,Some(Value::String(name)) if name=="mft"=>ScanEngine::Mft,Some(Value::String(name)) if name=="auto"=>ScanEngine::Auto,_=>return Err("invalid engine".into())}; let (stop,progress)=tree::new_controls(); scan_full_tree(&path,threads,engine,&stop,&progress).map(|tree|recommend::analyze(&tree).json()) })(),
+                        "duplicates" => (|| { let path=native_path::from_value(&args["path"])?; let threads=if args.get("threads").is_some() {u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")?} else {4}; duplicates::find_path(&path,threads).map(|report|report.json()) })(),
+                        "tree" => (|| { let path = native_path::from_value(&args["path"])?; let output = native_path::from_value(&args["output"])?; let threads = if args.get("threads").is_some() { u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")? } else { 4 }; { let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; tree::save_tree(&path, &output, threads, engine) } })(),
+                        "plan" => (|| { let paths = args["paths"].as_array().ok_or("paths required")?.iter().map(native_path::from_value).collect::<Result<Vec<_>,_>>()?; let out = native_path::from_value(&args["output"])?; { let mode = match args.get("mode") { None => CleanupMode::Recycle, Some(Value::String(name)) if name == "recycle" => CleanupMode::Recycle, Some(Value::String(name)) if name == "permanent" => CleanupMode::Permanent, _ => return Err("invalid cleanup mode".into()) }; save_plan_mode(&paths, &out, mode) } })(),
                         "apply" => Err("client must support human elicitation, and only one confirmation can be pending".into()),
                         _ => Err("unknown tool".into())
                     };
@@ -936,6 +934,8 @@ mod tests {
             assert!(read_checked_plan(&path).is_err());
         }
         value["version"] = json!(4);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(read_checked_plan(&path).is_ok());
         value.as_object_mut().unwrap().remove("mode");
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(read_checked_plan(&path).is_err());

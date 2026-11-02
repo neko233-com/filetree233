@@ -62,6 +62,12 @@ fn install_system_font(ctx: &egui::Context) {
         }
     }
 }
+fn raw_entry_path(entry: &serde_json::Value) -> Option<PathBuf> {
+    let units = entry.get("path_units")?.as_array()?;
+    let encoded =
+        serde_json::json!({"encoding":if cfg!(windows){"utf16"}else{"bytes"},"units":units});
+    crate::native_path::from_value(&encoded).ok()
+}
 fn is_lossless_display_path(entry: &serde_json::Value) -> bool {
     let Some(path) = entry["path"].as_str() else {
         return false;
@@ -638,13 +644,18 @@ impl eframe::App for App {
                     }
                     let is_dir = entry["directories"].as_u64().unwrap_or(0) > 0;
                     let lossless = is_lossless_display_path(entry);
+                    let raw_path = raw_entry_path(entry);
                     ui.horizontal(|ui| {
                         {
-                            let p = PathBuf::from(path);
-                            let mut selected = self.selected.contains(&p);
+                            let mut selected =
+                                raw_path.as_ref().is_some_and(|p| self.selected.contains(p));
                             if ui
-                                .add_enabled(lossless, egui::Checkbox::new(&mut selected, ""))
+                                .add_enabled(
+                                    raw_path.is_some(),
+                                    egui::Checkbox::new(&mut selected, ""),
+                                )
                                 .changed()
+                                && let Some(p) = raw_path
                             {
                                 if selected {
                                     self.selected.push(p);
@@ -669,7 +680,10 @@ impl eframe::App for App {
                         } else {
                             ui.label(path);
                             if !lossless {
-                                ui.colored_label(Color32::YELLOW, "raw path requires full tree");
+                                ui.colored_label(
+                                    Color32::YELLOW,
+                                    "raw path; see exact code units in plan",
+                                );
                             }
                         }
                         if entry["complete"] == false {
@@ -1186,7 +1200,7 @@ mod tests {
         assert!(app.rx.is_none());
     }
     #[test]
-    fn summary_disables_lossy_paths() {
+    fn summary_recovers_lossy_paths_from_raw_units() {
         let valid = serde_json::json!({"path":"abc", "path_units":crate::tree::raw_units(std::ffi::OsStr::new("abc"))});
         assert!(is_lossless_display_path(&valid));
         let mut lossy = valid.clone();

@@ -67,7 +67,7 @@ Windows 默认安装至 `%LOCALAPPDATA%\Programs\filetree233`；Linux/macOS 默�
 {"mcpServers":{"filetree233":{"command":"C:\\path\\to\\filetree233.exe","args":["serve"]}}}
 ```
 
-`volumes()` 返回已发现的卷，`capacity(path)` 查询指定路径的文件系统容量；`tree(path, output, threads?, engine?)` 将完整树写入扫描目录之外的新 JSONL 文件，禁止覆盖。`recommend(path, threads?, engine?)` 输出需要人工审核的缓存/构建目录建议、大小与风险，不自动选择或删除；`benchmark(path, threads?, iterations?, engine?)` 测量独立扫描进程的时间和峰值内存；`duplicates(path, threads?)` 返回重复文件及硬链接别名，不执行删除；`scan(path, threads?, engine?)` 返回子项大小、数量及扫描错误；`engine` 可选 `walk`、`mft`、`auto`，默认 `walk`；`plan(paths, output, mode?)` 生成计划而不删除，`mode` 为 `recycle`（默认）或 `permanent`；`apply(plan)` 通过 MCP 客户端展示计划并要求用户输入确认码，确认后重新校验再执行。客户端和本地系统必须可信：恶意客户端可以伪造 elicitation 答复。
+`volumes()` 返回已发现的卷，`capacity(path)` 查询指定路径的文件系统容量；`tree(path, output, threads?, engine?)` 将完整树写入扫描目录之外的新 JSONL 文件，禁止覆盖。`recommend(path, threads?, engine?)` 输出需要人工审核的缓存/构建目录建议、大小与风险，不自动选择或删除；`benchmark(path, threads?, iterations?, engine?)` 测量独立扫描进程的时间和峰值内存；`duplicates(path, threads?)` 返回重复文件及硬链接别名，不执行删除；`scan(path, threads?, engine?)` 返回子项大小、数量及扫描错误；`engine` 可选 `walk`、`mft`、`auto`，默认 `walk`；`plan(paths, output, mode?)` 生成计划而不删除，`mode` 为 `recycle`（默认）或 `permanent`；`apply(plan)` 通过 MCP 客户端展示计划并要求用户输入确认码，确认后重新校验再执行。客户端和本地系统必须可信：恶意客户端可以伪造 elicitation 答复。MCP 的路径参数可以是普通字符串，也可以是 `{"encoding":"utf16","units":[...]}`（Windows）或 `{"encoding":"bytes","units":[...]}`（Unix）；可使用扫描返回的 `path_units`，不要用有损显示文本替代原始路径。
 
 ## 限制与安全边界
 
@@ -77,5 +77,5 @@ Windows 默认安装至 `%LOCALAPPDATA%\Programs\filetree233`；Linux/macOS 默�
 - 重复文件查找按大小、分段哈希、完整 SHA-256 和逐字节比较筛选，硬链接作为同一文件的别名；读取失败或扫描不完整会标记结果不完整。搜索结果不会自动选择或删除文件。文件在检查后仍可能发生变化，共享存储或稀疏文件的实际可回收空间也可能不同。
 - 清理建议是待检查的线索，不代表目录可安全删除。建议包括 Rust `target`、Node `node_modules` / `.next`、Python 缓存、Gradle 缓存以及 Unity 项目的 `Library` / `Temp`；清理可能触发重新下载、重新构建或丢失自定义文件。大小是扫描快照，不等于可回收空间；生成计划时会重新统计并检查。
 - `apply` 按计划中的模式移动到系统回收站或永久删除，可能部分成功；回收站通常不会立即释放空间，恢复受系统及回收站设置影响；Windows 网络路径不支持回收站模式。失败不会由程序自动改为永久删除。不要把计划文件交给不可信用户修改。计划拒绝磁盘根目录、当前工作目录及其祖先、重叠目录和包含计划文件的目录。
-- 新计划格式为版本 4，显式记录处置模式，并对原始文件名、文件身份、状态变更时间、类型、长度和修改时间建立指纹；版本 2、3 的计划必须重新生成。计划路径本身必须能表示为 JSON 字符串；带有无法转换为 Unicode 的路径不能创建清理计划。扫描的 JSON 结果提供 `path_units` / `name_units` 保留原始名称，界面显示可能包含替代字符，一级汇总禁用有损路径的选择和导航。该指纹不读取文件内容，不能保证发现所有内容变化；校验到删除之间存在竞态。请关闭相关程序，避免扫描与不受信任进程共同写入的目录，并备份重要数据。
+- 新计划格式为版本 5，显式记录处置模式，并对原始文件名、文件身份、状态变更时间、类型、长度和修改时间建立指纹；版本 4 仍可使用，版本 2、3 须重新生成。无法转换为 Unicode 的路径在计划中以原始字节或 UTF-16 码元保存，并在确认时显示完整编码；系统回收站可能拒绝某些此类路径。扫描结果提供 `path_units` / `name_units`，界面显示可能包含替代字符；一级汇总允许按原始路径选择，但无法从文本框导航到有损路径。该指纹不读取文件内容，不能保证发现所有内容变化；校验到删除之间存在竞态。请关闭相关程序，避免扫描与不受信任进程共同写入的目录，并备份重要数据。
 - `bench` 不清理系统文件缓存，峰值内存包含整个进程及树；请分别测试冷缓存、热缓存及真实大盘，不能仅凭小目录结果推断全盘表现。尚未进行真实大盘性能、跨平台 GUI 和各平台安装端到端测试。
