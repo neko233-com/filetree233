@@ -55,6 +55,12 @@ jobs:
           FILETREE233_TEST_LIVE_MFT: '1'
           FILETREE233_TEST_FAST_ONLY: '1'
         run: cargo test --release --locked --target ${{ matrix.target }} --test mft_live -- --nocapture
+      - name: Verify MFT cancellation and failure handling
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        env:
+          FILETREE233_TEST_LIVE_MFT: '1'
+        run: cargo test --release --locked --target ${{ matrix.target }} --bin filetree233 live_parallel_cancellation_and_errors -- --nocapture
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Verify installers with the actual release executable
         env:

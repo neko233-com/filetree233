@@ -178,6 +178,9 @@ fn visit_scan_entries(
     mut visit: impl FnMut(ntfs_mft::RawMftEntry) -> Result<(), String>,
 ) -> Result<(), String> {
     use std::sync::{Arc, Mutex, atomic::Ordering, mpsc};
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("scan cancelled".into());
+    }
     if threads == 1 {
         for entry in raw
             .scan_entries_with_options(aggregation_scan_options())
@@ -465,6 +468,34 @@ mod tests {
         let options = aggregation_scan_options();
         assert!(!options.entry().collect_alternate_data_streams());
         assert!(options.entry().collect_dos_file_name_links());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn live_parallel_cancellation_and_errors() {
+        if std::env::var_os("FILETREE233_TEST_LIVE_MFT").is_none() {
+            return;
+        }
+        use std::sync::atomic::AtomicBool;
+        let temp = std::env::temp_dir();
+        let root = temp.ancestors().last().unwrap();
+        let mount = root.to_str().unwrap();
+        let volume = open_scan_volume(mount).unwrap();
+        let raw = volume.raw_mft().unwrap();
+        let cancelled = AtomicBool::new(true);
+        let error = visit_scan_entries(&raw, mount, 4, &cancelled, |_| Ok(())).unwrap_err();
+        assert!(error.contains("cancelled"));
+        cancelled.store(false, Ordering::Relaxed);
+        let error =
+            visit_scan_entries(&raw, r"Z:\filetree233-missing-mount", 4, &cancelled, |_| {
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(!error.is_empty());
+        let error = visit_scan_entries(&raw, mount, 4, &cancelled, |_| {
+            Err("injected consumer failure".into())
+        })
+        .unwrap_err();
+        assert!(error.contains("injected consumer failure"));
     }
     fn synthetic_record(used: bool) -> [u8; 1024] {
         let mut record = [0u8; 1024];

@@ -146,8 +146,9 @@ fn live_ntfs_volume_finds_created_demo_file() {
             .output()
             .unwrap();
         eprintln!(
-            "demo tree scan engine={} elapsed_ms={}",
+            "demo tree scan engine={} threads={} elapsed_ms={}",
             engine,
+            threads,
             start.elapsed().as_millis()
         );
         assert!(
@@ -280,21 +281,40 @@ fn live_ntfs_volume_finds_created_demo_file() {
             .sum::<u64>()
     );
     assert_eq!(rows[0]["allocated_bytes"], walk["total_allocated_bytes"]);
-    let measured = Command::new(env!("CARGO_BIN_EXE_filetree233"))
-        .arg("bench-once")
-        .arg(&demo)
-        .args(["--engine", "mft", "--threads", "4"])
-        .output()
-        .unwrap();
-    assert!(
-        measured.status.success(),
-        "{}",
-        String::from_utf8_lossy(&measured.stderr)
-    );
-    let measured: Value = serde_json::from_slice(&measured.stdout).unwrap();
-    assert_eq!(measured["engine"], "mft_fast");
-    assert_eq!(measured["requested_threads"], 4);
-    assert_eq!(measured["scan_threads"], 4);
+    let measure = |threads: &str| {
+        let result = Command::new(env!("CARGO_BIN_EXE_filetree233"))
+            .arg("bench-once")
+            .arg(&demo)
+            .args(["--engine", "mft", "--threads", threads])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let result: Value = serde_json::from_slice(&result.stdout).unwrap();
+        eprintln!(
+            "MFT benchmark threads={threads} scan_ms={} peak_bytes={}",
+            result["scan_ms"], result["peak_memory_bytes"]
+        );
+        assert_eq!(result["engine"], "mft_fast");
+        assert_eq!(result["requested_threads"], threads.parse::<u64>().unwrap());
+        assert_eq!(result["scan_threads"], threads.parse::<u64>().unwrap());
+        result
+    };
+    let serial = measure("1");
+    let parallel = measure("4");
+    for field in [
+        "entries",
+        "files",
+        "directories",
+        "logical_bytes",
+        "allocated_bytes",
+        "complete",
+    ] {
+        assert_eq!(serial[field], parallel[field], "different {field}");
+    }
     fs::remove_dir_all(demo).unwrap();
     fs::remove_file(external_link_target).unwrap();
 }
