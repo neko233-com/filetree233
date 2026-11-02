@@ -4,6 +4,7 @@ mod gui;
 mod mft;
 #[cfg(any(windows, test))]
 mod mft_index;
+mod recycle;
 mod tree;
 mod treemap;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -81,6 +82,9 @@ enum Command {
     },
     /// Create a cleanup plan for explicitly selected files and directories.
     Plan {
+        /// Choose recycle bin or permanent deletion; stored in the plan.
+        #[arg(long, value_enum, default_value_t = CleanupMode::Recycle)]
+        mode: CleanupMode,
         #[arg(required = true)]
         paths: Vec<PathBuf>,
         #[arg(short, long)]
@@ -100,10 +104,18 @@ struct Summary {
     directories: u64,
     fingerprint: String,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum CleanupMode {
+    Recycle,
+    Permanent,
+}
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Plan {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<CleanupMode>,
     targets: Vec<Summary>,
     total_bytes: u64,
     total_allocated_bytes: u64,
@@ -501,14 +513,20 @@ fn make_plan(paths: &[PathBuf], output: &Path) -> Result<Plan, String> {
             .ok_or("allocation overflow")
     })?;
     Ok(Plan {
-        version: 2,
+        version: 3,
+        mode: Some(CleanupMode::Permanent),
         targets,
         total_bytes,
         total_allocated_bytes,
     })
 }
+#[cfg(test)]
 fn save_plan(paths: &[PathBuf], output: &Path) -> Result<Value, String> {
-    let plan = make_plan(paths, output)?;
+    save_plan_mode(paths, output, CleanupMode::Permanent)
+}
+fn save_plan_mode(paths: &[PathBuf], output: &Path, mode: CleanupMode) -> Result<Value, String> {
+    let mut plan = make_plan(paths, output)?;
+    plan.mode = Some(mode);
     let data = serde_json::to_vec_pretty(&plan).map_err(err)?;
     let mut f = fs::OpenOptions::new()
         .write(true)
@@ -521,7 +539,7 @@ fn save_plan(paths: &[PathBuf], output: &Path) -> Result<Value, String> {
 fn read_checked_plan(path: &Path) -> Result<(Vec<u8>, Plan), String> {
     let data = fs::read(path).map_err(err)?;
     let plan: Plan = serde_json::from_slice(&data).map_err(err)?;
-    if plan.version != 2 || plan.targets.is_empty() {
+    if !matches!((plan.version, plan.mode), (2, None) | (3, Some(_))) || plan.targets.is_empty() {
         return Err("invalid plan version or empty plan".into());
     }
     let paths: Vec<_> = plan.targets.iter().map(|s| s.path.clone()).collect();
@@ -536,10 +554,21 @@ fn read_checked_plan(path: &Path) -> Result<(Vec<u8>, Plan), String> {
 }
 fn plan_description(data: &[u8], plan: &Plan) -> (String, String) {
     let digest = format!("{:x}", Sha256::digest(data));
-    let token = format!("DELETE {}", &digest[..12]);
-    let mut message = String::from(
-        "Permanent deletion; logical and attributed file allocation bytes, not guaranteed reclaimed space:\n",
+    let mode = plan.mode.unwrap_or(CleanupMode::Permanent);
+    let token = format!(
+        "{} {}",
+        if mode == CleanupMode::Recycle {
+            "RECYCLE"
+        } else {
+            "DELETE"
+        },
+        &digest[..12]
     );
+    let mut message = String::from(if mode == CleanupMode::Recycle {
+        "Move to the system recycle bin; space may remain occupied and recovery depends on the system:\n"
+    } else {
+        "Permanent deletion; logical and attributed file allocation bytes, not guaranteed reclaimed space:\n"
+    });
     for s in &plan.targets {
         message.push_str(&format!(
             "{} | {} bytes logical | {} bytes allocated | {} files | {} directories\n",
@@ -567,16 +596,17 @@ fn delete_checked(path: &Path, expected_data: &[u8]) -> Result<Value, String> {
         if metadata.file_type().is_symlink() || is_reparse(&metadata) {
             return Err(format!("target became a link: {}", s.path.display()));
         }
-        let result = if metadata.is_dir() {
-            fs::remove_dir_all(&s.path)
-        } else if metadata.is_file() {
-            fs::remove_file(&s.path)
-        } else {
+        if !metadata.is_dir() && !metadata.is_file() {
             return Err(format!("unsupported target: {}", s.path.display()));
+        }
+        let result = match plan.mode.unwrap_or(CleanupMode::Permanent) {
+            CleanupMode::Recycle => recycle::send(&s.path),
+            CleanupMode::Permanent if metadata.is_dir() => fs::remove_dir_all(&s.path).map_err(err),
+            CleanupMode::Permanent => fs::remove_file(&s.path).map_err(err),
         };
         if let Err(e) = result {
             return Err(format!(
-                "failed deleting {}: {e}; previously deleted: {:?}",
+                "cleanup failed for {}: {e}; previously processed: {:?}",
                 s.path.display(),
                 deleted
             ));
@@ -584,7 +614,7 @@ fn delete_checked(path: &Path, expected_data: &[u8]) -> Result<Value, String> {
         deleted.push(s.path.clone());
     }
     Ok(
-        json!({"deleted":deleted,"planned_logical_bytes":plan.total_bytes,"planned_allocated_attributed_bytes":plan.total_allocated_bytes}),
+        json!({"processed":deleted,"mode":plan.mode.unwrap_or(CleanupMode::Permanent),"planned_logical_bytes":plan.total_bytes,"planned_allocated_attributed_bytes":plan.total_allocated_bytes}),
     )
 }
 fn apply(path: &Path) -> Result<(), String> {
@@ -666,8 +696,8 @@ fn serve() -> Result<(), String> {
                 {"name":"scan","description":"Analyze immediate children with optional parallel workers, reporting logical bytes, attributed allocation and errors.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path"]}},
                 {"name":"duplicates","description":"Find content-verified duplicate files; hard links are aliases and no deletion occurs.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32}},"required":["path"]}},
                 {"name":"tree","description":"Scan a full filesystem tree and write a new JSONL snapshot outside the scanned directory.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"output":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path","output"]}},
-                {"name":"plan","description":"Create a cleanup plan for explicitly selected files and directories; no deletion.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"},"minItems":1},"output":{"type":"string"}},"required":["paths","output"]}},
-                {"name":"apply","description":"Permanently delete a previously planned set of files and directories after client-mediated human confirmation and revalidation.","annotations":{"destructiveHint":true,"openWorldHint":false},"inputSchema":{"type":"object","properties":{"plan":{"type":"string"}},"required":["plan"]}}
+                {"name":"plan","description":"Create a cleanup plan for explicitly selected files and directories; no deletion.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"},"minItems":1},"output":{"type":"string"},"mode":{"type":"string","enum":["recycle","permanent"],"default":"recycle"}},"required":["paths","output"]}},
+                {"name":"apply","description":"Apply the plan's recycle or permanent mode after client-mediated human confirmation and revalidation.","annotations":{"destructiveHint":true,"openWorldHint":false},"inputSchema":{"type":"object","properties":{"plan":{"type":"string"}},"required":["plan"]}}
             ]}}),
             "tools/call" => {
                 let args = &req["params"]["arguments"];
@@ -699,7 +729,7 @@ fn serve() -> Result<(), String> {
                         "scan" => (|| { let path = args["path"].as_str().ok_or("path required")?; let threads = if args.get("threads").is_some() { u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")? } else { 4 }; let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; scan_dispatch(Path::new(path), threads, engine) })(),
                         "duplicates" => (|| { let path=args["path"].as_str().ok_or("path required")?; let threads=if args.get("threads").is_some() {u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")?} else {4}; duplicates::find_path(Path::new(path),threads).map(|report|report.json()) })(),
                         "tree" => (|| { let path = args["path"].as_str().ok_or("path required")?; let output = args["output"].as_str().ok_or("output required")?; let threads = if args.get("threads").is_some() { u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")? } else { 4 }; { let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; tree::save_tree(Path::new(path), Path::new(output), threads, engine) } })(),
-                        "plan" => (|| { let paths = args["paths"].as_array().ok_or("paths required")?.iter().map(|v| v.as_str().map(PathBuf::from).ok_or("invalid path")).collect::<Result<Vec<_>,_>>()?; let out = args["output"].as_str().ok_or("output required")?; save_plan(&paths, Path::new(out)) })(),
+                        "plan" => (|| { let paths = args["paths"].as_array().ok_or("paths required")?.iter().map(|v| v.as_str().map(PathBuf::from).ok_or("invalid path")).collect::<Result<Vec<_>,_>>()?; let out = args["output"].as_str().ok_or("output required")?; { let mode = match args.get("mode") { None => CleanupMode::Recycle, Some(Value::String(name)) if name == "recycle" => CleanupMode::Recycle, Some(Value::String(name)) if name == "permanent" => CleanupMode::Permanent, _ => return Err("invalid cleanup mode".into()) }; save_plan_mode(&paths, Path::new(out), mode) } })(),
                         "apply" => Err("client must support human elicitation, and only one confirmation can be pending".into()),
                         _ => Err("unknown tool".into())
                     };
@@ -756,7 +786,7 @@ fn main() {
         Command::Duplicates { path, threads } => duplicates::find_path(&path, threads).and_then(|report| { println!("{}",serde_json::to_string_pretty(&report.json()).map_err(err)?); Ok(()) }),
         Command::MftInspect { path, record_size, used_only } => mft::inspect_stdout(&path, record_size, used_only),
         Command::MftVolume { mount, name, fast } => mft::inspect_volume_stdout(&mount, name.as_deref(), fast),
-        Command::Plan { paths, output } => save_plan(&paths, &output)
+        Command::Plan { paths, output, mode } => save_plan_mode(&paths, &output, mode)
             .map(|v| println!("{}", serde_json::to_string_pretty(&v).unwrap())),
         Command::Apply { plan } => apply(&plan),
         Command::Serve => serve(),
@@ -789,6 +819,78 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn recycle_plan_confirms_mode_and_round_trips_demo_file() {
+        let f = Fixture::new();
+        let target = f.0.join(format!(
+            "filetree233-recycle-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&target, b"recoverable demo").unwrap();
+        let plan_path = f.0.join("recycle-plan.json");
+        save_plan_mode(
+            std::slice::from_ref(&target),
+            &plan_path,
+            CleanupMode::Recycle,
+        )
+        .unwrap();
+        let (data, plan) = read_checked_plan(&plan_path).unwrap();
+        let (message, token) = plan_description(&data, &plan);
+        assert!(message.contains("system recycle bin"));
+        assert!(token.starts_with("RECYCLE "));
+        let mut modified: Value = serde_json::from_slice(&data).unwrap();
+        modified["mode"] = json!("permanent");
+        fs::write(&plan_path, serde_json::to_vec(&modified).unwrap()).unwrap();
+        assert!(delete_checked(&plan_path, &data).is_err());
+        assert!(target.exists());
+        fs::write(&plan_path, &data).unwrap();
+        let result = delete_checked(&plan_path, &data).unwrap();
+        assert_eq!(result["mode"], "recycle");
+        assert!(!target.exists());
+        #[cfg(any(windows, target_os = "linux"))]
+        {
+            let items: Vec<_> = trash::os_limited::list()
+                .unwrap()
+                .into_iter()
+                .filter(|item| item.original_path().file_name() == target.file_name())
+                .collect();
+            assert_eq!(items.len(), 1, "unique fixture absent from system trash");
+            trash::os_limited::restore_all(items).unwrap();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let trash_path = PathBuf::from(std::env::var_os("HOME").unwrap())
+                .join(".Trash")
+                .join(target.file_name().unwrap());
+            assert!(
+                trash_path.exists(),
+                "unique fixture absent from Finder Trash"
+            );
+            fs::rename(trash_path, &target).unwrap();
+        }
+        assert_eq!(fs::read(&target).unwrap(), b"recoverable demo");
+    }
+    #[test]
+    fn accepts_legacy_plan_as_permanent_but_requires_mode_in_v3() {
+        let f = Fixture::new();
+        let target = f.0.join("target");
+        fs::write(&target, b"demo").unwrap();
+        let path = f.0.join("plan.json");
+        save_plan_mode(std::slice::from_ref(&target), &path, CleanupMode::Permanent).unwrap();
+        let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("mode");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(read_checked_plan(&path).is_err());
+        value["version"] = json!(2);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let (data, plan) = read_checked_plan(&path).unwrap();
+        assert!(plan_description(&data, &plan).1.starts_with("DELETE "));
+        assert!(target.exists());
     }
     #[test]
     fn plan_tracks_nested_bytes_and_detects_changes() {

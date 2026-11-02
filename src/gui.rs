@@ -1,5 +1,6 @@
 use crate::{
-    ScanEngine, delete_checked, plan_description, read_checked_plan, save_plan, scan_dispatch,
+    CleanupMode, ScanEngine, delete_checked, plan_description, read_checked_plan, save_plan_mode,
+    scan_dispatch,
 };
 use eframe::egui::{self, Color32, RichText, Sense, Vec2};
 use std::{
@@ -94,6 +95,7 @@ struct App {
     selected: Vec<PathBuf>,
     status: String,
     rx: Option<Receiver<Result<ScanResult, String>>>,
+    cleanup_mode: CleanupMode,
     plan_path: String,
     plan_data: Option<Vec<u8>>,
     plan_details: String,
@@ -138,6 +140,7 @@ impl Default for App {
                 .join("filetree233-plan.json")
                 .display()
                 .to_string(),
+            cleanup_mode: CleanupMode::Recycle,
             plan_data: None,
             plan_details: String::new(),
             token: String::new(),
@@ -317,8 +320,29 @@ impl eframe::App for App {
                 ui.horizontal(|ui| {
                     ui.label("Plan file");
                     ui.add(egui::TextEdit::singleline(&mut self.plan_path).desired_width(420.0));
+                    egui::ComboBox::from_id_salt("cleanup_mode")
+                        .selected_text(match self.cleanup_mode {
+                            CleanupMode::Recycle => "Recycle bin",
+                            CleanupMode::Permanent => "Permanent",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.cleanup_mode,
+                                CleanupMode::Recycle,
+                                "Recycle bin",
+                            );
+                            ui.selectable_value(
+                                &mut self.cleanup_mode,
+                                CleanupMode::Permanent,
+                                "Permanent",
+                            );
+                        });
                     if ui.button("Create cleanup plan").clicked() {
-                        match save_plan(&self.selected, &PathBuf::from(&self.plan_path)) {
+                        match save_plan_mode(
+                            &self.selected,
+                            &PathBuf::from(&self.plan_path),
+                            self.cleanup_mode,
+                        ) {
                             Ok(_) => match read_checked_plan(&PathBuf::from(&self.plan_path)) {
                                 Ok((data, plan)) => {
                                     let (message, token) = plan_description(&data, &plan);
@@ -338,13 +362,16 @@ impl eframe::App for App {
                     ui.horizontal(|ui| {
                         ui.label("Confirmation");
                         ui.text_edit_singleline(&mut self.confirm);
-                        if ui.button("Permanently delete").clicked() {
+                        if ui.button("Apply confirmed plan").clicked() {
                             if self.confirm == self.token {
                                 let data = self.plan_data.take().unwrap();
                                 match delete_checked(&PathBuf::from(&self.plan_path), &data) {
                                     Ok(v) => {
                                         self.status = format!("{v}");
                                         self.entries.clear();
+                                        self.tree = None;
+                                        self.duplicates = None;
+                                        self.duplicate_window_open = false;
                                         self.selected.clear();
                                     }
                                     Err(e) => self.status = e,

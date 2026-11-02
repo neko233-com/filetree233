@@ -23,6 +23,14 @@ fn scenario(mode: &str) {
     assert!(
         Command::new(exe)
             .arg("plan")
+            .args([
+                "--mode",
+                if mode == "recycle_decline" {
+                    "recycle"
+                } else {
+                    "permanent"
+                }
+            ])
             .arg(&target)
             .arg("-o")
             .arg(&plan)
@@ -69,7 +77,12 @@ fn scenario(mode: &str) {
             .contains("5 bytes")
     );
     let token = format!(
-        "DELETE {:.12}",
+        "{} {:.12}",
+        if mode == "recycle_decline" {
+            "RECYCLE"
+        } else {
+            "DELETE"
+        },
         format!("{:x}", Sha256::digest(fs::read(&plan).unwrap()))
     );
     if mode == "changed" {
@@ -77,7 +90,7 @@ fn scenario(mode: &str) {
     }
     send(
         &mut input,
-        json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"action":if mode == "decline" {"decline"} else {"accept"},"content":{"confirmation":token}}}),
+        json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"action":if mode == "decline" || mode == "recycle_decline" {"decline"} else {"accept"},"content":{"confirmation":token}}}),
     );
     let result = receive(&mut output);
     assert_eq!(result["result"]["isError"], mode != "approve");
@@ -89,6 +102,10 @@ fn scenario(mode: &str) {
 #[test]
 fn declined_confirmation_does_not_delete() {
     scenario("decline");
+}
+#[test]
+fn declined_recycle_confirmation_keeps_fixture() {
+    scenario("recycle_decline");
 }
 #[test]
 fn changed_target_does_not_delete() {
