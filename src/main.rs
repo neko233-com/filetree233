@@ -492,17 +492,26 @@ fn scan_full_tree(
     match engine {
         ScanEngine::Walk => tree::scan(path, threads, cancelled, progress),
         ScanEngine::Mft => mft::scan_snapshot(path, cancelled, progress),
-        ScanEngine::Auto => match mft::scan_snapshot(path, cancelled, progress) {
-            Ok(snapshot) => Ok(snapshot),
-            Err(error) if cancelled.load(std::sync::atomic::Ordering::Relaxed) => Err(error),
-            Err(error) => {
+        ScanEngine::Auto => {
+            let root = fs::canonicalize(path).map_err(err)?;
+            if root.parent().is_some() {
                 let mut snapshot = tree::scan(path, threads, cancelled, progress)?;
-                snapshot.fallback_reason = Some(error);
-                Ok(snapshot)
+                snapshot.fallback_reason = Some(AUTO_SUBDIRECTORY_REASON.into());
+                return Ok(snapshot);
             }
-        },
+            match mft::scan_snapshot(path, cancelled, progress) {
+                Ok(snapshot) => Ok(snapshot),
+                Err(error) if cancelled.load(std::sync::atomic::Ordering::Relaxed) => Err(error),
+                Err(error) => {
+                    let mut snapshot = tree::scan(path, threads, cancelled, progress)?;
+                    snapshot.fallback_reason = Some(error);
+                    Ok(snapshot)
+                }
+            }
+        }
     }
 }
+const AUTO_SUBDIRECTORY_REASON: &str = "auto selects filesystem traversal for subdirectories";
 fn scan_dispatch(path: &Path, threads: u8, engine: ScanEngine) -> Result<Value, String> {
     if !(1..=32).contains(&threads) {
         return Err("threads must be between 1 and 32".into());
@@ -514,8 +523,7 @@ fn scan_dispatch(path: &Path, threads: u8, engine: ScanEngine) -> Result<Value, 
             let root = fs::canonicalize(path).map_err(err)?;
             if root.parent().is_some() {
                 let mut result = scan_with_threads(&root, threads)?;
-                result["fallback_reason"] =
-                    json!("auto selects filesystem traversal for subdirectories");
+                result["fallback_reason"] = json!(AUTO_SUBDIRECTORY_REASON);
                 return Ok(result);
             }
             match mft::scan_tree(&root) {
