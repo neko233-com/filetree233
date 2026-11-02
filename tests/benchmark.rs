@@ -29,10 +29,13 @@ fn benchmark_reports_isolated_scan_measurements() {
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["iterations"], 2);
     assert_eq!(result["threads"], 2);
+    assert_eq!(result["requested_threads"], 2);
     let runs = result["runs"].as_array().unwrap();
     assert_eq!(runs.len(), 2);
     for run in runs {
         assert_eq!(run["engine"], "filesystem_walk");
+        assert_eq!(run["requested_threads"], 2);
+        assert_eq!(run["scan_threads"], 2);
         assert_eq!(run["complete"], true);
         assert_eq!(run["entries"], 4);
         assert_eq!(run["files"], 2);

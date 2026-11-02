@@ -39,8 +39,15 @@ pub fn once(path: &Path, threads: u8, engine: ScanEngine) -> Result<Value, Strin
     let snapshot = scan_full_tree(path, threads, engine, &cancelled, &progress)?;
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let root = &snapshot.nodes[0];
+    // The current MFT implementation is serial even when the caller requests
+    // more workers. Report the scan workers rather than implying otherwise.
+    let scan_threads = if snapshot.engine == "mft_fast" {
+        1
+    } else {
+        threads
+    };
     Ok(
-        json!({"scan_ms":elapsed_ms,"peak_memory_bytes":peak_memory()?,"memory_metric":if cfg!(windows){"peak_working_set"}else{"peak_rss"},"engine":snapshot.engine,"fallback_reason":snapshot.fallback_reason,"entries":snapshot.nodes.len(),"files":root.files,"directories":root.directories,"logical_bytes":root.logical,"allocated_bytes":root.allocated,"complete":root.complete}),
+        json!({"scan_ms":elapsed_ms,"peak_memory_bytes":peak_memory()?,"memory_metric":if cfg!(windows){"peak_working_set"}else{"peak_rss"},"engine":snapshot.engine,"requested_threads":threads,"scan_threads":scan_threads,"fallback_reason":snapshot.fallback_reason,"entries":snapshot.nodes.len(),"files":root.files,"directories":root.directories,"logical_bytes":root.logical,"allocated_bytes":root.allocated,"complete":root.complete}),
     )
 }
 
@@ -82,6 +89,6 @@ pub fn run(path: &Path, threads: u8, engine: ScanEngine, iterations: u8) -> Resu
         durations[durations.len() / 2]
     };
     Ok(
-        json!({"root":path.to_string_lossy(),"root_path":crate::native_path::value(path),"requested_engine":engine_name,"threads":threads,"iterations":iterations,"scan_median_ms":median,"runs":runs,"note":"Each run is a separate process; filesystem caches are not cleared. Peak memory includes runtime and tree, not just scan allocations."}),
+        json!({"root":path.to_string_lossy(),"root_path":crate::native_path::value(path),"requested_engine":engine_name,"threads":threads,"requested_threads":threads,"iterations":iterations,"scan_median_ms":median,"runs":runs,"note":"Each run is a separate process; filesystem caches are not cleared. Peak memory includes runtime and tree, not just scan allocations. threads is the requested count; see each run's scan_threads for the actual scan worker count."}),
     )
 }
