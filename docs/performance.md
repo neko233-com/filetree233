@@ -19,3 +19,7 @@
 运行 `cargo test --release --locked --bin filetree233 benchmark_snapshot_index -- --ignored --nocapture` 可重复测量目录索引处理：生成 1,000 个范围内目录、50,000 个范围外目录（其共同祖先深 64 层）和 20,000 条文件链接，其中一半位于扫描范围内。
 
 2026-11-02 在上述 Windows / Ryzen 9 9950X 环境各运行一次：优化前目录索引 164 ms、完整处理 173 ms；优化后分别为 5 ms、10 ms。两次均得到 11,001 个树节点。该基准只测内存中的索引逻辑，**不包括读取 MFT、文件系统 I/O 或大盘真实扫描**，也不能据此推断与 WizTree 的整体速度差异。
+
+## 宽目录内存汇总基准
+
+运行 `cargo test --release --locked --bin filetree233 benchmark_wide_directory_finalization -- --ignored --nocapture`，生成 25 万个同级文件节点，仅计时内存中的树汇总。2026-11-02 Windows / Ryzen 9 9950X、Rust 1.99.1 本机三次观察：移除旧界面使用的同级排序前约 21–24 ms，移除后约 0.5–0.6 ms。该测试不包括生成节点、磁盘读取、导出或进程启动，不能据此推断全盘扫描速度或内存占用。

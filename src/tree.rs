@@ -284,28 +284,6 @@ pub(crate) fn finalize(root: PathBuf, mut nodes: Vec<Node>) -> Snapshot {
         n.directories = n.directories.saturating_add(directories);
         n.complete &= complete;
     }
-    // Sort siblings once instead of on every UI frame.
-    for id in 0..nodes.len() {
-        if !nodes[id].is_dir {
-            continue;
-        }
-        let mut children = Vec::new();
-        let mut child = nodes[id].first_child;
-        while child != NONE {
-            children.push(child);
-            child = nodes[child as usize].next_sibling;
-        }
-        children.sort_unstable_by(|a, b| {
-            nodes[*b as usize]
-                .logical
-                .cmp(&nodes[*a as usize].logical)
-                .then_with(|| nodes[*a as usize].name.cmp(&nodes[*b as usize].name))
-        });
-        nodes[id].first_child = children.first().copied().unwrap_or(NONE);
-        for (i, child) in children.iter().enumerate() {
-            nodes[*child as usize].next_sibling = children.get(i + 1).copied().unwrap_or(NONE);
-        }
-    }
     Snapshot {
         root,
         nodes,
@@ -552,6 +530,35 @@ mod tests {
         assert_eq!(rows[2]["name_units"], serde_json::json!([0xd800, 120]));
         #[cfg(unix)]
         assert_eq!(rows[2]["name_units"], serde_json::json!([255, 120]));
+    }
+    #[test]
+    #[ignore = "explicit in-memory finalization benchmark"]
+    fn benchmark_wide_directory_finalization() {
+        for _ in 0..3 {
+            let count = 250_000u32;
+            let mut root = Node::new(OsString::new(), NONE);
+            root.is_dir = true;
+            root.directories = 1;
+            let mut nodes = Vec::with_capacity(count as usize + 1);
+            nodes.push(root);
+            for id in 1..=count {
+                let mut child = Node::new(format!("file-{:08}", id.wrapping_mul(7919)).into(), 0);
+                child.files = 1;
+                child.logical = u64::from(id.wrapping_mul(7919) % 100_000);
+                child.next_sibling = nodes[0].first_child;
+                nodes[0].first_child = id;
+                nodes.push(child);
+            }
+            let start = std::time::Instant::now();
+            let tree = finalize(PathBuf::from("benchmark"), nodes);
+            std::hint::black_box(&tree);
+            eprintln!(
+                "wide_finalization_us={} nodes={}",
+                start.elapsed().as_micros(),
+                tree.nodes.len()
+            );
+            assert_eq!(tree.nodes[0].files, u64::from(count));
+        }
     }
     #[test]
     fn batched_scan_preserves_every_child_and_parent() {
