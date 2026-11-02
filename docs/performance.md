@@ -1,6 +1,6 @@
 # 扫描性能测量
 
-`filetree233 bench PATH --engine walk --threads 4 --iterations 3` 为每次扫描启动独立进程，输出扫描耗时、进程总耗时、峰值工作集（Windows）或峰值 RSS（Linux/macOS）、实际引擎和结果完整性。`requested_threads` 是用户请求数，`scan_threads` 是实际扫描线程数；当前 MFT 引擎固定为 1。系统缓存不会被清理；磁盘、文件数量、目录结构和后台进程都会影响结果。可使用 `--engine mft` 测量具备权限的 Windows NTFS 卷；`--engine auto` 会报告实际引擎与回退原因。此命令只扫描，不清理。
+`filetree233 bench PATH --engine walk --threads 4 --iterations 3` 为每次扫描启动独立进程，输出扫描耗时、进程总耗时、峰值工作集（Windows）或峰值 RSS（Linux/macOS）、实际引擎和结果完整性。`requested_threads` 是用户请求数，`scan_threads` 是实际扫描线程数；MFT 通过有界分块并行读取并按记录顺序合并。系统缓存不会被清理；磁盘、文件数量、目录结构和后台进程都会影响结果。可使用 `--engine mft` 测量具备权限的 Windows NTFS 卷；`--engine auto` 会报告实际引擎与回退原因。此命令只扫描，不清理。
 
 以下是一次本机观察，用于验证基准工具与建立起点，不是性能承诺或 WizTree 对比：
 

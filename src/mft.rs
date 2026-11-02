@@ -140,10 +140,12 @@ pub fn inspect_stdout(path: &Path, record_size: usize, used_only: bool) -> Resul
     inspect(path, record_size, used_only, &mut io::stdout().lock())
 }
 #[cfg(windows)]
-pub fn scan_tree(path: &Path) -> Result<serde_json::Value, String> {
+pub fn scan_tree(path: &Path, threads: u8) -> Result<serde_json::Value, String> {
     let (cancelled, progress) = crate::tree::new_controls();
-    let (index, root) = scan_index(path, false, &cancelled, &progress)?;
-    Ok(index.finish(&root))
+    let (index, root) = scan_index(path, false, threads, &cancelled, &progress)?;
+    let mut result = index.finish(&root);
+    result["threads"] = json!(threads);
+    Ok(result)
 }
 #[cfg(any(windows, test))]
 fn aggregation_scan_options() -> ntfs_mft::RawMftScanOptions {
@@ -154,17 +156,137 @@ fn aggregation_scan_options() -> ntfs_mft::RawMftScanOptions {
         .build()
 }
 #[cfg(windows)]
+fn open_scan_volume(mount: &str) -> Result<ntfs_mft::Volume, String> {
+    let b = mount.as_bytes();
+    if b.len() == 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\' {
+        ntfs_mft::Volume::from_drive_letter(b[0] as char).map_err(|e| e.to_string())
+    } else {
+        ntfs_mft::Volume::from_mount_point(Path::new(mount.trim_end_matches('\\')))
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Deliver records in ascending order with at most one bounded chunk per worker
+/// waiting to be merged. This avoids the unbounded out-of-order result buffer of
+/// the dependency's general parallel scanner.
+#[cfg(windows)]
+fn visit_scan_entries(
+    raw: &ntfs_mft::RawMft<'_>,
+    mount: &str,
+    threads: u8,
+    cancelled: &std::sync::atomic::AtomicBool,
+    mut visit: impl FnMut(ntfs_mft::RawMftEntry) -> Result<(), String>,
+) -> Result<(), String> {
+    use std::sync::{Arc, Mutex, atomic::Ordering, mpsc};
+    if threads == 1 {
+        for entry in raw
+            .scan_entries_with_options(aggregation_scan_options())
+            .map_err(|e| e.to_string())?
+        {
+            if cancelled.load(Ordering::Relaxed) {
+                return Err("scan cancelled".into());
+            }
+            visit(entry.map_err(|e| e.to_string())?)?;
+        }
+        return Ok(());
+    }
+    const CHUNK_RECORDS: u64 = 1024;
+    let workers = usize::from(threads);
+    let end = raw.record_count();
+    std::thread::scope(|scope| {
+        let (tasks_tx, tasks_rx) = mpsc::channel::<(usize, u64, u64)>();
+        let tasks_rx = Arc::new(Mutex::new(tasks_rx));
+        let (results_tx, results_rx) =
+            mpsc::channel::<Result<(usize, Vec<ntfs_mft::RawMftEntry>), String>>();
+        for _ in 0..workers {
+            let tasks = Arc::clone(&tasks_rx);
+            let results = results_tx.clone();
+            scope.spawn(move || {
+                let worker = || -> Result<(), String> {
+                    let volume = open_scan_volume(mount)?;
+                    let raw = volume.raw_mft().map_err(|e| e.to_string())?;
+                    loop {
+                        let task = { tasks.lock().map_err(|e| e.to_string())?.recv() };
+                        let Ok((id, start, end)) = task else { break };
+                        if cancelled.load(Ordering::Relaxed) {
+                            return Err("scan cancelled".into());
+                        }
+                        let options = ntfs_mft::RawMftScanOptions::builder()
+                            .collect_alternate_data_streams(false)
+                            .range(start..end)
+                            .build();
+                        let mut entries = Vec::new();
+                        for entry in raw
+                            .scan_entries_with_options(options)
+                            .map_err(|e| e.to_string())?
+                        {
+                            if cancelled.load(Ordering::Relaxed) {
+                                return Err("scan cancelled".into());
+                            }
+                            entries.push(entry.map_err(|e| e.to_string())?);
+                        }
+                        if results.send(Ok((id, entries))).is_err() {
+                            return Ok(());
+                        }
+                    }
+                    Ok(())
+                };
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(worker)) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        let _ = results.send(Err(error));
+                    }
+                    Err(_) => {
+                        let _ = results.send(Err("MFT worker panicked".into()));
+                    }
+                }
+            });
+        }
+        drop(results_tx);
+        let result = (|| {
+            let mut start = 24u64;
+            while start < end {
+                let mut count = 0usize;
+                while count < workers && start < end {
+                    let next = start.saturating_add(CHUNK_RECORDS).min(end);
+                    tasks_tx
+                        .send((count, start, next))
+                        .map_err(|e| e.to_string())?;
+                    count += 1;
+                    start = next;
+                }
+                let mut ordered: Vec<Option<Vec<ntfs_mft::RawMftEntry>>> =
+                    (0..count).map(|_| None).collect();
+                for _ in 0..count {
+                    let (id, entries) = results_rx.recv().map_err(|e| e.to_string())??;
+                    ordered[id] = Some(entries);
+                }
+                for entries in ordered {
+                    for entry in entries.ok_or("missing MFT chunk")? {
+                        visit(entry)?;
+                    }
+                }
+            }
+            Ok(())
+        })();
+        drop(tasks_tx);
+        result
+    })
+}
+#[cfg(windows)]
 pub fn scan_snapshot(
     path: &Path,
+    threads: u8,
     cancelled: &std::sync::atomic::AtomicBool,
     progress: &std::sync::atomic::AtomicU64,
 ) -> Result<crate::tree::Snapshot, String> {
-    let (index, root) = scan_index(path, true, cancelled, progress)?;
+    let (index, root) = scan_index(path, true, threads, cancelled, progress)?;
     Ok(index.finish_snapshot(&root))
 }
 #[cfg(not(windows))]
 pub fn scan_snapshot(
     _: &Path,
+    _: u8,
     _: &std::sync::atomic::AtomicBool,
     _: &std::sync::atomic::AtomicU64,
 ) -> Result<crate::tree::Snapshot, String> {
@@ -174,6 +296,7 @@ pub fn scan_snapshot(
 fn scan_index(
     path: &Path,
     snapshot: bool,
+    threads: u8,
     cancelled: &std::sync::atomic::AtomicBool,
     progress: &std::sync::atomic::AtomicU64,
 ) -> Result<(crate::mft_index::Index, std::path::PathBuf), String> {
@@ -227,29 +350,18 @@ fn scan_index(
         "non-Unicode volume mount is unsupported by the MFT backend; use filesystem traversal",
     )?;
     let display_mount = mount_text.strip_prefix(r"\\?\").unwrap_or(mount_text);
-    let b = display_mount.as_bytes();
-    let volume = if b.len() == 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\' {
-        ntfs_mft::Volume::from_drive_letter(b[0] as char).map_err(|e| e.to_string())?
-    } else {
-        // The dependency adds its own trailing backslash for a mounted folder.
-        ntfs_mft::Volume::from_mount_point(Path::new(display_mount.trim_end_matches('\\')))
-            .map_err(|e| e.to_string())?
-    };
+    let volume = open_scan_volume(display_mount)?;
     let raw = volume.raw_mft().map_err(|e| e.to_string())?;
     let mut index = Index::new(root_id);
     if snapshot {
         index.enable_snapshot();
     }
     let mut root_found = root_id & 0x0000_ffff_ffff_ffff == 5;
-    for record in raw
-        .scan_entries_with_options(aggregation_scan_options())
-        .map_err(|e| e.to_string())?
-    {
+    visit_scan_entries(&raw, display_mount, threads, cancelled, |entry| {
         if cancelled.load(Ordering::Relaxed) {
             return Err("scan cancelled".into());
         }
         progress.fetch_add(1, Ordering::Relaxed);
-        let entry = record.map_err(|e| e.to_string())?;
         if entry.file_reference.get() == root_id {
             root_found = true;
         }
@@ -261,7 +373,8 @@ fn scan_index(
                 reparse: entry.is_reparse_point,
             });
         }
-    }
+        Ok(())
+    })?;
     if !root_found {
         return Err("target directory reference not found in MFT; use filesystem scan".into());
     }
@@ -270,22 +383,18 @@ fn scan_index(
     // link names and opening resident/sparse files until a parent is in scope.
     // For a volume-root scan, avoid the extra lookup on every file.
     let filter_parents = root_id & 0x0000_ffff_ffff_ffff != 5;
-    for record in raw
-        .scan_entries_with_options(aggregation_scan_options())
-        .map_err(|e| e.to_string())?
-    {
+    visit_scan_entries(&raw, display_mount, threads, cancelled, |entry| {
         if cancelled.load(Ordering::Relaxed) {
             return Err("scan cancelled".into());
         }
         progress.fetch_add(1, Ordering::Relaxed);
-        let entry = record.map_err(|e| e.to_string())?;
         if entry.is_directory || entry.is_reparse_point {
-            continue;
+            return Ok(());
         }
         let mut links = Vec::new();
         if entry.links.is_empty() {
             if filter_parents && !index.includes_file_parent(entry.parent_reference.get()) {
-                continue;
+                return Ok(());
             }
             links.push(Link {
                 parent: entry.parent_reference.get(),
@@ -311,12 +420,12 @@ fn scan_index(
             }
         }
         if links.is_empty() {
-            continue;
+            return Ok(());
         }
         // Only materialize a full path when special allocation needs a Win32 query.
         let allocated = if entry.is_resident || entry.is_sparse || entry.is_compressed {
             let Some(path) = index.file_path(&root, &links) else {
-                continue;
+                return Ok(());
             };
             match fs::symlink_metadata(&path).and_then(|m| {
                 if crate::is_reparse(&m) || !m.is_file() {
@@ -327,18 +436,19 @@ fn scan_index(
                 Ok(a) => a.bytes,
                 Err(error) => {
                     index.add_file_unknown(&links, entry.real_size, &error.to_string());
-                    continue;
+                    return Ok(());
                 }
             }
         } else {
             entry.allocated_size
         };
         index.add_file(&links, entry.real_size, allocated);
-    }
+        Ok(())
+    })?;
     Ok((index, root))
 }
 #[cfg(not(windows))]
-pub fn scan_tree(_: &Path) -> Result<serde_json::Value, String> {
+pub fn scan_tree(_: &Path, _: u8) -> Result<serde_json::Value, String> {
     Err("MFT directory aggregation currently supports Windows only".into())
 }
 

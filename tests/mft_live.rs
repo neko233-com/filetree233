@@ -137,12 +137,12 @@ fn live_ntfs_volume_finds_created_demo_file() {
         .output()
         .unwrap();
     assert!(junction.status.success(), "cannot create demo junction");
-    let scan = |engine: &str| {
+    let scan = |engine: &str, threads: &str| {
         let start = std::time::Instant::now();
         let result = Command::new(env!("CARGO_BIN_EXE_filetree233"))
             .arg("scan")
             .arg(&demo)
-            .args(["--json", "--engine", engine])
+            .args(["--json", "--engine", engine, "--threads", threads])
             .output()
             .unwrap();
         eprintln!(
@@ -157,10 +157,13 @@ fn live_ntfs_volume_finds_created_demo_file() {
         );
         serde_json::from_slice::<Value>(&result.stdout).unwrap()
     };
-    let walk = scan("walk");
-    let mft = scan("mft");
+    let walk = scan("walk", "4");
+    let mft_serial = scan("mft", "1");
+    let mft = scan("mft", "4");
     assert_eq!(mft["engine"], "mft_fast");
     assert_eq!(mft["complete"], false);
+    assert_eq!(mft_serial["threads"], 1);
+    assert_eq!(mft["threads"], 4);
     for summary in [&walk, &mft] {
         let odd = summary["entries"]
             .as_array()
@@ -194,6 +197,12 @@ fn live_ntfs_volume_finds_created_demo_file() {
         "outside",
         "junction",
     ] {
+        assert_eq!(row(&mft_serial, name)["bytes"], row(&mft, name)["bytes"]);
+        assert_eq!(row(&mft_serial, name)["files"], row(&mft, name)["files"]);
+        assert_eq!(
+            row(&mft_serial, name)["directories"],
+            row(&mft, name)["directories"]
+        );
         assert_eq!(
             row(&walk, name)["bytes"],
             row(&mft, name)["bytes"],
@@ -211,6 +220,10 @@ fn live_ntfs_volume_finds_created_demo_file() {
         );
     }
     assert_eq!(walk["total_allocated_bytes"], mft["total_allocated_bytes"]);
+    assert_eq!(
+        mft_serial["total_allocated_bytes"],
+        mft["total_allocated_bytes"]
+    );
     let full = Command::new(env!("CARGO_BIN_EXE_filetree233"))
         .arg("tree")
         .arg(&demo)
@@ -281,7 +294,7 @@ fn live_ntfs_volume_finds_created_demo_file() {
     let measured: Value = serde_json::from_slice(&measured.stdout).unwrap();
     assert_eq!(measured["engine"], "mft_fast");
     assert_eq!(measured["requested_threads"], 4);
-    assert_eq!(measured["scan_threads"], 1);
+    assert_eq!(measured["scan_threads"], 4);
     fs::remove_dir_all(demo).unwrap();
     fs::remove_file(external_link_target).unwrap();
 }

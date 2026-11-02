@@ -491,7 +491,7 @@ fn scan_full_tree(
     }
     match engine {
         ScanEngine::Walk => tree::scan(path, threads, cancelled, progress),
-        ScanEngine::Mft => mft::scan_snapshot(path, cancelled, progress),
+        ScanEngine::Mft => mft::scan_snapshot(path, threads, cancelled, progress),
         ScanEngine::Auto => {
             let root = fs::canonicalize(path).map_err(err)?;
             if root.parent().is_some() {
@@ -499,7 +499,7 @@ fn scan_full_tree(
                 snapshot.fallback_reason = Some(AUTO_SUBDIRECTORY_REASON.into());
                 return Ok(snapshot);
             }
-            match mft::scan_snapshot(path, cancelled, progress) {
+            match mft::scan_snapshot(path, threads, cancelled, progress) {
                 Ok(snapshot) => Ok(snapshot),
                 Err(error) if cancelled.load(std::sync::atomic::Ordering::Relaxed) => Err(error),
                 Err(error) => {
@@ -518,7 +518,7 @@ fn scan_dispatch(path: &Path, threads: u8, engine: ScanEngine) -> Result<Value, 
     }
     match engine {
         ScanEngine::Walk => scan_with_threads(path, threads),
-        ScanEngine::Mft => mft::scan_tree(path),
+        ScanEngine::Mft => mft::scan_tree(path, threads),
         ScanEngine::Auto => {
             let root = fs::canonicalize(path).map_err(err)?;
             if root.parent().is_some() {
@@ -526,7 +526,7 @@ fn scan_dispatch(path: &Path, threads: u8, engine: ScanEngine) -> Result<Value, 
                 result["fallback_reason"] = json!(AUTO_SUBDIRECTORY_REASON);
                 return Ok(result);
             }
-            match mft::scan_tree(&root) {
+            match mft::scan_tree(&root, threads) {
                 Ok(result) => Ok(result),
                 Err(reason) => {
                     let mut result = scan_with_threads(&root, threads)?;

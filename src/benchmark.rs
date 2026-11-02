@@ -39,13 +39,7 @@ pub fn once(path: &Path, threads: u8, engine: ScanEngine) -> Result<Value, Strin
     let snapshot = scan_full_tree(path, threads, engine, &cancelled, &progress)?;
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let root = &snapshot.nodes[0];
-    // The current MFT implementation is serial even when the caller requests
-    // more workers. Report the scan workers rather than implying otherwise.
-    let scan_threads = if snapshot.engine == "mft_fast" {
-        1
-    } else {
-        threads
-    };
+    let scan_threads = threads;
     Ok(
         json!({"scan_ms":elapsed_ms,"peak_memory_bytes":peak_memory()?,"memory_metric":if cfg!(windows){"peak_working_set"}else{"peak_rss"},"engine":snapshot.engine,"requested_threads":threads,"scan_threads":scan_threads,"fallback_reason":snapshot.fallback_reason,"entries":snapshot.nodes.len(),"files":root.files,"directories":root.directories,"logical_bytes":root.logical,"allocated_bytes":root.allocated,"complete":root.complete}),
     )
