@@ -1,7 +1,11 @@
 //! Conservative, explainable cleanup candidates. No candidate authorizes deletion.
 use crate::tree::Snapshot;
 use serde_json::{Value, json};
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    cmp::Reverse,
+    collections::{BinaryHeap, HashMap},
+    path::PathBuf,
+};
 const MAX_CANDIDATES: usize = 10_000;
 #[derive(Debug)]
 pub struct Candidate {
@@ -61,6 +65,18 @@ pub fn analyze(tree: &Snapshot) -> Report {
     };
     let mut inside_candidate = vec![false; tree.nodes.len()];
     let mut parent_markers: HashMap<u32, Markers> = HashMap::new();
+    // The smallest retained size (and, on ties, largest path) is at the top.
+    // Keep only ids and metadata until the final results are constructed.
+    let mut best = BinaryHeap::<
+        Reverse<(
+            u64,
+            Reverse<PathBuf>,
+            u32,
+            &'static str,
+            &'static str,
+            &'static str,
+        )>,
+    >::new();
     for (id, node) in tree.nodes.iter().enumerate().skip(1) {
         let parent = node.parent as usize;
         if inside_candidate[parent] {
@@ -144,21 +160,51 @@ pub fn analyze(tree: &Snapshot) -> Report {
         if let Some((rule, reason, risk)) = rule {
             inside_candidate[id] = true;
             report.total_candidates += 1;
-            if report.candidates.len() < MAX_CANDIDATES {
-                report.candidates.push(Candidate {
-                    path: tree.path(id as u32),
+            if best.len() == MAX_CANDIDATES
+                && best
+                    .peek()
+                    .is_some_and(|Reverse(item)| node.logical < item.0)
+            {
+                continue;
+            }
+            let item = (
+                node.logical,
+                Reverse(tree.path(id as u32)),
+                id as u32,
+                rule,
+                reason,
+                risk,
+            );
+            if best.len() < MAX_CANDIDATES {
+                best.push(Reverse(item));
+            } else if best
+                .peek()
+                .is_some_and(|Reverse(smallest)| item > *smallest)
+            {
+                best.pop();
+                best.push(Reverse(item));
+            }
+        }
+    }
+    report.candidates = best
+        .into_iter()
+        .map(
+            |Reverse((logical, Reverse(path), id, rule, reason, risk))| {
+                let node = &tree.nodes[id as usize];
+                Candidate {
+                    path,
                     rule,
                     reason,
                     risk,
-                    logical: node.logical,
+                    logical,
                     allocated: node.allocated,
                     files: node.files,
                     directories: node.directories,
                     complete: tree.nodes[0].complete && node.complete,
-                });
-            }
-        }
-    }
+                }
+            },
+        )
+        .collect();
     report
         .candidates
         .sort_by(|a, b| b.logical.cmp(&a.logical).then_with(|| a.path.cmp(&b.path)));
@@ -173,6 +219,60 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn capped_recommendations_keep_largest_and_suppress_nested() {
+        let mut root = crate::tree::Node::new(Default::default(), crate::tree::NONE);
+        root.is_dir = true;
+        root.directories = 1;
+        let mut nodes = vec![root];
+        for i in 0..MAX_CANDIDATES + 2 {
+            let parent_id = nodes.len() as u32;
+            let mut parent = crate::tree::Node::new(format!("project-{i:05}").into(), 0);
+            parent.is_dir = true;
+            parent.directories = 1;
+            parent.next_sibling = nodes[0].first_child;
+            nodes[0].first_child = parent_id;
+            nodes.push(parent);
+            let child_id = nodes.len() as u32;
+            let mut child = crate::tree::Node::new("__pycache__".into(), parent_id);
+            child.is_dir = true;
+            child.directories = 1;
+            child.logical = if i == MAX_CANDIDATES + 1 { 1000 } else { 1 };
+            nodes[parent_id as usize].first_child = child_id;
+            nodes.push(child);
+            if i == MAX_CANDIDATES + 1 {
+                let mut nested = crate::tree::Node::new(".pytest_cache".into(), child_id);
+                nested.is_dir = true;
+                nested.directories = 1;
+                nodes[child_id as usize].first_child = nodes.len() as u32;
+                nodes.push(nested);
+            }
+        }
+        let tree = crate::tree::finalize(PathBuf::from("demo"), nodes);
+        let report = analyze(&tree);
+        assert_eq!(report.total_candidates, (MAX_CANDIDATES + 2) as u64);
+        assert_eq!(report.candidates.len(), MAX_CANDIDATES);
+        assert_eq!(report.candidates[0].logical, 1000);
+        assert!(
+            report.candidates[0]
+                .path
+                .ends_with("project-10001/__pycache__")
+        );
+        assert!(
+            report
+                .candidates
+                .iter()
+                .any(|c| c.path.ends_with("project-00000/__pycache__"))
+        );
+        assert!(
+            !report
+                .candidates
+                .iter()
+                .any(|c| c.path.ends_with("project-10000/__pycache__"))
+        );
+        assert!(report.candidates.iter().all(|c| c.rule != "pytest_cache"));
+        assert_eq!(report.json()["truncated"], true);
+    }
     #[test]
     fn incomplete_tree_is_reflected_in_recommendations() {
         let root = std::env::temp_dir().join(format!(
