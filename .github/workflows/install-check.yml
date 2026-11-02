@@ -1,0 +1,43 @@
+name: Verify published installers
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag to install
+        required: true
+        default: v0.1.0-alpha.1
+permissions:
+  contents: read
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm, ubuntu-22.04, ubuntu-22.04-arm, macos-14, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version }}
+      - name: Install on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = Join-Path $env:RUNNER_TEMP 'filetree233-test'
+          ./scripts/install.ps1 -Version $env:RELEASE_VERSION -InstallDir $target
+          $actual = & (Join-Path $target 'filetree233.exe') --version
+          if ($LASTEXITCODE -ne 0 -or $actual -ne "filetree233 $($env:RELEASE_VERSION.TrimStart('v'))") { throw "Unexpected version: $actual" }
+      - name: Install on Linux or macOS
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          FILETREE233_VERSION: ${{ inputs.version }}
+          FILETREE233_INSTALL_DIR: ${{ runner.temp }}/filetree233-test
+        run: |
+          set -euo pipefail
+          sh scripts/install.sh
+          actual=$("$FILETREE233_INSTALL_DIR/filetree233" --version)
+          test "$actual" = "filetree233 ${FILETREE233_VERSION#v}"
