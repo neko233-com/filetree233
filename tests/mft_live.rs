@@ -18,7 +18,12 @@ fn live_ntfs_volume_finds_created_demo_file() {
     let file = root.join(&name);
     fs::write(&file, vec![42; 32768]).unwrap();
     let volume_root = file.ancestors().last().unwrap();
-    for fast in [false, true] {
+    let modes: &[bool] = if std::env::var_os("FILETREE233_TEST_FAST_ONLY").is_some() {
+        &[true]
+    } else {
+        &[false, true]
+    };
+    for &fast in modes {
         let start = std::time::Instant::now();
         let mut command = Command::new(env!("CARGO_BIN_EXE_filetree233"));
         command
