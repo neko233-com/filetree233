@@ -77,6 +77,26 @@ fn live_ntfs_volume_finds_created_demo_file() {
     fs::write(demo.join("alpha/nested/data"), vec![1u8; 32768]).unwrap();
     fs::hard_link(demo.join("alpha/nested/data"), demo.join("beta/hardlink")).unwrap();
     fs::write(demo.join("root-file"), vec![2u8; 8192]).unwrap();
+    fs::write(demo.join("alpha").join("nested").join("中文.txt"), b"ok").unwrap();
+    let sparse = demo.join("sparse.bin");
+    let sparse_file = fs::File::create(&sparse).unwrap();
+    let mark = Command::new("fsutil")
+        .args(["sparse", "setflag"])
+        .arg(&sparse)
+        .output()
+        .unwrap();
+    assert!(mark.status.success(), "cannot create sparse demo file");
+    sparse_file.set_len(64 * 1024 * 1024).unwrap();
+    drop(sparse_file);
+    fs::create_dir(demo.join("outside")).unwrap();
+    fs::write(demo.join("outside/keep"), b"outside").unwrap();
+    let junction = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(demo.join("junction"))
+        .arg(demo.join("outside"))
+        .output()
+        .unwrap();
+    assert!(junction.status.success(), "cannot create demo junction");
     let scan = |engine: &str| {
         let start = std::time::Instant::now();
         let result = Command::new(env!("CARGO_BIN_EXE_filetree233"))
@@ -110,7 +130,15 @@ fn live_ntfs_volume_finds_created_demo_file() {
             .cloned()
             .expect("demo entry missing")
     };
-    for name in ["alpha", "beta", "empty", "root-file"] {
+    for name in [
+        "alpha",
+        "beta",
+        "empty",
+        "root-file",
+        "sparse.bin",
+        "outside",
+        "junction",
+    ] {
         assert_eq!(
             row(&walk, name)["bytes"],
             row(&mft, name)["bytes"],
