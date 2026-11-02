@@ -277,3 +277,40 @@ fn duplicates_cli_and_mcp_report_verified_copies_without_deleting() {
     assert!(proc.wait().unwrap().success());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn mcp_benchmark_reports_measurements_and_rejects_invalid_iterations() {
+    let root = std::env::temp_dir().join(format!(
+        "filetree233-mcp-benchmark-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("file"), b"demo").unwrap();
+    let mut proc = Command::new(env!("CARGO_BIN_EXE_filetree233"))
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = proc.stdin.take().unwrap();
+    let mut reader = BufReader::new(proc.stdout.take().unwrap());
+    for (id, iterations) in [(1, 1), (2, 0)] {
+        writeln!(input, "{}", json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"benchmark","arguments":{"path":root,"iterations":iterations}}})).unwrap();
+        input.flush().unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let result: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(result["result"]["isError"], iterations == 0);
+        if iterations == 1 {
+            let report: Value =
+                serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(report["runs"][0]["logical_bytes"], 4);
+            assert!(report["runs"][0]["peak_memory_bytes"].as_u64().unwrap() > 0);
+        }
+    }
+    drop(input);
+    assert!(proc.wait().unwrap().success());
+    fs::remove_dir_all(root).unwrap();
+}

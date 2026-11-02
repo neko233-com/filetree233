@@ -21,6 +21,7 @@ filetree233 scan /path/to/dir --json --threads 4
 filetree233 tree /path/to/dir --threads 4 > tree.jsonl
 filetree233 tree C:\Data --engine mft > mft-tree.jsonl  # Windows NTFS, experimental
 filetree233 duplicates /path/to/dir --threads 4
+filetree233 bench /path/to/dir --threads 4 --iterations 3  # 独立进程测量时间与峰值内存
 filetree233 scan C:\Data --engine mft --json  # Windows NTFS, experimental
 filetree233 scan C:\Data --engine auto --json # MFT or traversal fallback
 filetree233 plan /path/to/cache -o /path/to/plan.json  # 默认回收站
@@ -35,6 +36,8 @@ filetree233 serve               # MCP stdio
 GUI 中输入扫描路径，`Walk` 的 Full tree 模式支持展开目录、点击 treemap 和取消扫描；取消 Full tree 后使用一级汇总。勾选文件或目录，填写不存在的计划文件路径，再创建计划。选择回收站或永久删除，人工核对后输入界面显示的确认码，才能执行。计划文件不能放在待删目录内。
 
 离线 `mft-inspect` 按 JSON Lines 流式输出已导出的逻辑 MFT 记录、无效槽及最终统计；记录大小必须由来源确认，不能自行猜测。该接口会输出文件名等元数据，包含用于保留原始名称的 UTF-16 码元。`mft-volume` 可只读访问 NTFS 挂载卷的 MFT，Windows 通常要求管理员权限；这是原始记录检查接口，不提供目录汇总或清理计划。`--fast` 使用批量读取，可能跳过损坏记录或遗漏扩展属性，无法统计跳过的数量，结果始终标记不完整；默认模式提供逐条错误信息。离线解析不能证明记录完整，也不能替代实时卷扫描或作为删除依据。
+
+性能测量方法和一次小目录实测见 [docs/performance.md](docs/performance.md)。
 
 ## 一键安装
 
@@ -60,7 +63,7 @@ Windows 默认安装至 `%LOCALAPPDATA%\Programs\filetree233`；Linux/macOS 默�
 {"mcpServers":{"filetree233":{"command":"C:\\path\\to\\filetree233.exe","args":["serve"]}}}
 ```
 
-`tree(path, output, threads?, engine?)` 将完整树写入扫描目录之外的新 JSONL 文件，禁止覆盖。`duplicates(path, threads?)` 返回重复文件及硬链接别名，不执行删除；`scan(path, threads?, engine?)` 返回子项大小、数量及扫描错误；`engine` 可选 `walk`、`mft`、`auto`，默认 `walk`；`plan(paths, output, mode?)` 生成计划而不删除，`mode` 为 `recycle`（默认）或 `permanent`；`apply(plan)` 通过 MCP 客户端展示计划并要求用户输入确认码，确认后重新校验再执行。客户端和本地系统必须可信：恶意客户端可以伪造 elicitation 答复。
+`tree(path, output, threads?, engine?)` 将完整树写入扫描目录之外的新 JSONL 文件，禁止覆盖。`benchmark(path, threads?, iterations?, engine?)` 测量独立扫描进程的时间和峰值内存；`duplicates(path, threads?)` 返回重复文件及硬链接别名，不执行删除；`scan(path, threads?, engine?)` 返回子项大小、数量及扫描错误；`engine` 可选 `walk`、`mft`、`auto`，默认 `walk`；`plan(paths, output, mode?)` 生成计划而不删除，`mode` 为 `recycle`（默认）或 `permanent`；`apply(plan)` 通过 MCP 客户端展示计划并要求用户输入确认码，确认后重新校验再执行。客户端和本地系统必须可信：恶意客户端可以伪造 elicitation 答复。
 
 ## 限制与安全边界
 
@@ -69,4 +72,4 @@ Windows 默认安装至 `%LOCALAPPDATA%\Programs\filetree233`；Linux/macOS 默�
 - 重复文件查找按大小、分段哈希、完整 SHA-256 和逐字节比较筛选，硬链接作为同一文件的别名；读取失败或扫描不完整会标记结果不完整。搜索结果不会自动选择或删除文件。文件在检查后仍可能发生变化，共享存储或稀疏文件的实际可回收空间也可能不同。
 - `apply` 按计划中的模式移动到系统回收站或永久删除，可能部分成功；回收站通常不会立即释放空间，恢复受系统及回收站设置影响；Windows 网络路径不支持回收站模式。失败不会由程序自动改为永久删除。不要把计划文件交给不可信用户修改。计划拒绝磁盘根目录、当前工作目录及其祖先、重叠目录和包含计划文件的目录。
 - 新计划格式为版本 3，显式记录处置模式；版本 2 计划按永久删除解释，仍须人工确认。指纹基于路径、类型、长度和修改时间，无法检测所有同大小同时间内容变化；校验到删除之间存在竞态。请关闭相关程序，避免扫描与不受信任进程共同写入的目录，并备份重要数据。
-- 尚未进行真实大盘性能、峰值内存、跨平台 GUI 和各平台安装端到端测试。
+- `bench` 不清理系统文件缓存，峰值内存包含整个进程及树；请分别测试冷缓存、热缓存及真实大盘，不能仅凭小目录结果推断全盘表现。尚未进行真实大盘性能、跨平台 GUI 和各平台安装端到端测试。

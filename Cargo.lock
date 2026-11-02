@@ -774,6 +774,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "clap",
  "eframe",
+ "libc",
  "ntfs-mft",
  "serde",
  "serde_json",

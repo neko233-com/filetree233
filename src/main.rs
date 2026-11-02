@@ -1,4 +1,5 @@
 mod allocation;
+mod benchmark;
 mod duplicates;
 mod gui;
 mod mft;
@@ -47,6 +48,24 @@ enum Command {
     },
     /// Scan a full filesystem tree and stream its entries as JSON Lines.
     Tree {
+        path: PathBuf,
+        #[arg(long, value_enum, default_value_t = ScanEngine::Walk)]
+        engine: ScanEngine,
+        #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=32))]
+        threads: u8,
+    },
+    /// Measure full-tree scan time and peak process memory using isolated runs.
+    Bench {
+        path: PathBuf,
+        #[arg(long, value_enum, default_value_t = ScanEngine::Walk)]
+        engine: ScanEngine,
+        #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=32))]
+        threads: u8,
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=10))]
+        iterations: u8,
+    },
+    #[command(hide = true)]
+    BenchOnce {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = ScanEngine::Walk)]
         engine: ScanEngine,
@@ -694,6 +713,7 @@ fn serve() -> Result<(), String> {
             "ping" => json!({"jsonrpc":"2.0","id":id,"result":{}}),
             "tools/list" => json!({"jsonrpc":"2.0","id":id,"result":{"tools":[
                 {"name":"scan","description":"Analyze immediate children with optional parallel workers, reporting logical bytes, attributed allocation and errors.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path"]}},
+                {"name":"benchmark","description":"Measure full-tree scan time and peak memory in separate local processes; no deletion.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32},"iterations":{"type":"integer","minimum":1,"maximum":10},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path"]}},
                 {"name":"duplicates","description":"Find content-verified duplicate files; hard links are aliases and no deletion occurs.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32}},"required":["path"]}},
                 {"name":"tree","description":"Scan a full filesystem tree and write a new JSONL snapshot outside the scanned directory.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"output":{"type":"string"},"threads":{"type":"integer","minimum":1,"maximum":32},"engine":{"type":"string","enum":["walk","mft","auto"]}},"required":["path","output"]}},
                 {"name":"plan","description":"Create a cleanup plan for explicitly selected files and directories; no deletion.","inputSchema":{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"},"minItems":1},"output":{"type":"string"},"mode":{"type":"string","enum":["recycle","permanent"],"default":"recycle"}},"required":["paths","output"]}},
@@ -727,6 +747,7 @@ fn serve() -> Result<(), String> {
                 } else {
                     let result = match name {
                         "scan" => (|| { let path = args["path"].as_str().ok_or("path required")?; let threads = if args.get("threads").is_some() { u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")? } else { 4 }; let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; scan_dispatch(Path::new(path), threads, engine) })(),
+                        "benchmark" => (|| { let path=args["path"].as_str().ok_or("path required")?; let n=|key: &str, default: u8| -> Result<u8, &str> { match args.get(key) { None => Ok(default), Some(v) => u8::try_from(v.as_u64().ok_or("invalid numeric argument")?).map_err(|_| "invalid numeric argument") } }; let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; benchmark::run(Path::new(path), n("threads",4)?, engine, n("iterations",3)?) })(),
                         "duplicates" => (|| { let path=args["path"].as_str().ok_or("path required")?; let threads=if args.get("threads").is_some() {u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")?} else {4}; duplicates::find_path(Path::new(path),threads).map(|report|report.json()) })(),
                         "tree" => (|| { let path = args["path"].as_str().ok_or("path required")?; let output = args["output"].as_str().ok_or("output required")?; let threads = if args.get("threads").is_some() { u8::try_from(args["threads"].as_u64().ok_or("invalid threads")?).map_err(|_| "invalid threads")? } else { 4 }; { let engine = match args.get("engine") { None => ScanEngine::Walk, Some(Value::String(name)) if name == "walk" => ScanEngine::Walk, Some(Value::String(name)) if name == "mft" => ScanEngine::Mft, Some(Value::String(name)) if name == "auto" => ScanEngine::Auto, _ => return Err("invalid engine".into()) }; tree::save_tree(Path::new(path), Path::new(output), threads, engine) } })(),
                         "plan" => (|| { let paths = args["paths"].as_array().ok_or("paths required")?.iter().map(|v| v.as_str().map(PathBuf::from).ok_or("invalid path")).collect::<Result<Vec<_>,_>>()?; let out = args["output"].as_str().ok_or("output required")?; { let mode = match args.get("mode") { None => CleanupMode::Recycle, Some(Value::String(name)) if name == "recycle" => CleanupMode::Recycle, Some(Value::String(name)) if name == "permanent" => CleanupMode::Permanent, _ => return Err("invalid cleanup mode".into()) }; save_plan_mode(&paths, Path::new(out), mode) } })(),
@@ -783,6 +804,8 @@ fn main() {
             let (cancelled, progress) = tree::new_controls();
             scan_full_tree(&path, threads, engine, &cancelled, &progress).and_then(|snapshot| snapshot.write_jsonl(&mut std::io::stdout().lock()))
         },
+        Command::Bench { path, threads, engine, iterations } => benchmark::run(&path, threads, engine, iterations).and_then(|value| { println!("{}", serde_json::to_string_pretty(&value).map_err(err)?); Ok(()) }),
+        Command::BenchOnce { path, threads, engine } => benchmark::once(&path, threads, engine).map(|value| { println!("{value}"); }),
         Command::Duplicates { path, threads } => duplicates::find_path(&path, threads).and_then(|report| { println!("{}",serde_json::to_string_pretty(&report.json()).map_err(err)?); Ok(()) }),
         Command::MftInspect { path, record_size, used_only } => mft::inspect_stdout(&path, record_size, used_only),
         Command::MftVolume { mount, name, fast } => mft::inspect_volume_stdout(&mount, name.as_deref(), fast),
