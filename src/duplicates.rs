@@ -38,6 +38,9 @@ struct Candidate {
     path: PathBuf,
     aliases: Vec<PathBuf>,
     size: u64,
+    stamp: Stamp,
+    identity: allocation::FileId,
+    change: (i64, i64),
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Stamp {
@@ -50,7 +53,122 @@ fn stamp(m: &fs::Metadata) -> io::Result<Stamp> {
         modified: m.modified()?,
     })
 }
-fn open_checked(path: &Path, expected: u64) -> Result<(File, Stamp), String> {
+#[cfg(unix)]
+fn file_identity(file: &File) -> io::Result<allocation::FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let m = file.metadata()?;
+    Ok(allocation::FileId(m.dev(), m.ino()))
+}
+#[cfg(windows)]
+fn file_identity(file: &File) -> io::Result<allocation::FileId> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(allocation::FileId(
+        info.dwVolumeSerialNumber as u64,
+        ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+    ))
+}
+#[cfg(not(any(unix, windows)))]
+fn file_identity(_: &File) -> io::Result<allocation::FileId> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "file identity unavailable",
+    ))
+}
+#[cfg(unix)]
+fn change_version(file: &File) -> io::Result<(i64, i64)> {
+    use std::os::unix::fs::MetadataExt;
+    let m = file.metadata()?;
+    Ok((m.ctime(), m.ctime_nsec()))
+}
+#[cfg(windows)]
+fn change_version(file: &File) -> io::Result<(i64, i64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandleEx,
+    };
+    let mut info: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as _,
+            FileBasicInfo,
+            &mut info as *mut _ as _,
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((info.ChangeTime, 0))
+}
+#[cfg(not(any(unix, windows)))]
+fn change_version(_: &File) -> io::Result<(i64, i64)> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "file change time unavailable",
+    ))
+}
+#[cfg(unix)]
+fn open_identity(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+#[cfg(windows)]
+fn open_identity(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+    };
+    fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+#[cfg(not(any(unix, windows)))]
+fn open_identity(_: &Path) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "file identity unavailable",
+    ))
+}
+#[cfg(unix)]
+fn open_content(path: &Path) -> io::Result<File> {
+    open_identity(path)
+}
+#[cfg(windows)]
+fn open_content(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+#[cfg(not(any(unix, windows)))]
+fn open_content(_: &Path) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "safe file open unavailable",
+    ))
+}
+fn open_checked(
+    path: &Path,
+    expected: u64,
+) -> Result<(File, Stamp, allocation::FileId, (i64, i64)), String> {
     let m = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     if !m.is_file() || m.file_type().is_symlink() || is_reparse(&m) {
         return Err("not a regular file".into());
@@ -59,13 +177,25 @@ fn open_checked(path: &Path, expected: u64) -> Result<(File, Stamp), String> {
     if original.len != expected {
         return Err("file size changed after scan".into());
     }
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    if stamp(&file.metadata().map_err(|e| e.to_string())?).map_err(|e| e.to_string())? != original {
+    let file = open_content(path).map_err(|e| e.to_string())?;
+    let opened = file.metadata().map_err(|e| e.to_string())?;
+    if !opened.is_file()
+        || is_reparse(&opened)
+        || stamp(&opened).map_err(|e| e.to_string())? != original
+    {
         return Err("file changed while opening".into());
     }
-    Ok((file, original))
+    let identity = file_identity(&file).map_err(|e| e.to_string())?;
+    let change = change_version(&file).map_err(|e| e.to_string())?;
+    Ok((file, original, identity, change))
 }
-fn verify_stamp(path: &Path, file: &File, before: Stamp) -> Result<(), String> {
+fn verify_stamp(
+    path: &Path,
+    file: &File,
+    before: Stamp,
+    identity: allocation::FileId,
+    change: (i64, i64),
+) -> Result<(), String> {
     let handle = stamp(&file.metadata().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     if metadata.file_type().is_symlink()
@@ -76,15 +206,34 @@ fn verify_stamp(path: &Path, file: &File, before: Stamp) -> Result<(), String> {
     {
         return Err("file changed while reading".into());
     }
+    let current = open_identity(path).map_err(|e| e.to_string())?;
+    let current_metadata = current.metadata().map_err(|e| e.to_string())?;
+    if is_reparse(&current_metadata)
+        || !current_metadata.is_file()
+        || stamp(&current_metadata).map_err(|e| e.to_string())? != before
+        || file_identity(&current).map_err(|e| e.to_string())? != identity
+        || file_identity(file).map_err(|e| e.to_string())? != identity
+        || change_version(&current).map_err(|e| e.to_string())? != change
+        || change_version(file).map_err(|e| e.to_string())? != change
+    {
+        return Err("file identity changed while reading".into());
+    }
     Ok(())
 }
-fn digest(
-    path: &Path,
-    size: u64,
-    sample: bool,
-    cancelled: &AtomicBool,
-) -> Result<[u8; 32], String> {
-    let (mut file, before) = open_checked(path, size)?;
+fn revalidate_candidate_path(candidate: &Candidate, path: &Path) -> Result<(), String> {
+    let (file, stamp, identity, change) = open_checked(path, candidate.size)?;
+    if stamp != candidate.stamp || identity != candidate.identity || change != candidate.change {
+        return Err("file changed since duplicate candidate selection".into());
+    }
+    verify_stamp(path, &file, stamp, identity, change)
+}
+fn digest(candidate: &Candidate, sample: bool, cancelled: &AtomicBool) -> Result<[u8; 32], String> {
+    let path = &candidate.path;
+    let size = candidate.size;
+    let (mut file, before, identity, change) = open_checked(path, size)?;
+    if before != candidate.stamp || identity != candidate.identity || change != candidate.change {
+        return Err("file changed since duplicate candidate selection".into());
+    }
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; CHUNK];
     if sample && size > (2 * CHUNK) as u64 {
@@ -109,12 +258,26 @@ fn digest(
             hasher.update(&buffer[..n]);
         }
     }
-    verify_stamp(path, &file, before)?;
+    verify_stamp(path, &file, before, identity, change)?;
     Ok(hasher.finalize().into())
 }
-fn equal_content(a: &Path, b: &Path, size: u64, cancelled: &AtomicBool) -> Result<bool, String> {
-    let (mut af, astamp) = open_checked(a, size)?;
-    let (mut bf, bstamp) = open_checked(b, size)?;
+fn equal_content(
+    a: &Candidate,
+    b: &Candidate,
+    size: u64,
+    cancelled: &AtomicBool,
+) -> Result<bool, String> {
+    let (mut af, astamp, aid, achange) = open_checked(&a.path, size)?;
+    let (mut bf, bstamp, bid, bchange) = open_checked(&b.path, size)?;
+    if astamp != a.stamp
+        || aid != a.identity
+        || achange != a.change
+        || bstamp != b.stamp
+        || bid != b.identity
+        || bchange != b.change
+    {
+        return Err("file changed since duplicate candidate selection".into());
+    }
     let mut ab = vec![0u8; CHUNK];
     let mut bb = vec![0u8; CHUNK];
     let mut equal = true;
@@ -132,8 +295,8 @@ fn equal_content(a: &Path, b: &Path, size: u64, cancelled: &AtomicBool) -> Resul
         }
         remaining -= count as u64;
     }
-    verify_stamp(a, &af, astamp)?;
-    verify_stamp(b, &bf, bstamp)?;
+    verify_stamp(&a.path, &af, astamp, aid, achange)?;
+    verify_stamp(&b.path, &bf, bstamp, bid, bchange)?;
     Ok(equal)
 }
 fn hash_jobs(
@@ -156,7 +319,7 @@ fn hash_jobs(
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(&id) = ids.get(i) else { break };
                     let c = &candidates[id];
-                    let result = digest(&c.path, c.size, sample, cancelled);
+                    let result = digest(c, sample, cancelled);
                     results
                         .lock()
                         .expect("hash results poisoned")
@@ -208,9 +371,41 @@ pub fn find(
             });
             match info {
                 Ok(info) => {
+                    let (file, observed, identity, change) = match open_checked(&path, size) {
+                        Ok(value) => value,
+                        Err(e) => {
+                            record_error(&mut errors, &mut error_count, &path, &e);
+                            continue;
+                        }
+                    };
+                    if info.shared_id.is_some_and(|id| id != identity) {
+                        record_error(
+                            &mut errors,
+                            &mut error_count,
+                            &path,
+                            "file identity changed during candidate selection",
+                        );
+                        continue;
+                    }
+                    if let Err(e) = verify_stamp(&path, &file, observed, identity, change) {
+                        record_error(&mut errors, &mut error_count, &path, &e);
+                        continue;
+                    }
                     if let Some(existing) =
                         info.shared_id.and_then(|key| identities.get(&key).copied())
                     {
+                        if objects[existing].identity != identity
+                            || objects[existing].stamp != observed
+                            || objects[existing].change != change
+                        {
+                            record_error(
+                                &mut errors,
+                                &mut error_count,
+                                &path,
+                                "hard link changed during candidate selection",
+                            );
+                            continue;
+                        }
                         objects[existing].aliases.push(path);
                     } else {
                         if let Some(key) = info.shared_id {
@@ -220,6 +415,9 @@ pub fn find(
                             path,
                             aliases: Vec::new(),
                             size,
+                            stamp: observed,
+                            identity,
+                            change,
                         });
                     }
                 }
@@ -270,12 +468,7 @@ pub fn find(
             let mut matched = false;
             let mut failed = false;
             for cluster in &mut clusters {
-                match equal_content(
-                    &candidates[cluster[0]].path,
-                    &candidates[id].path,
-                    size,
-                    cancelled,
-                ) {
+                match equal_content(&candidates[cluster[0]], &candidates[id], size, cancelled) {
                     Ok(true) => {
                         cluster.push(id);
                         matched = true;
@@ -301,13 +494,30 @@ pub fn find(
             continue;
         }
         for cluster in clusters.into_iter().filter(|v| v.len() > 1) {
-            let mut objects: Vec<_> = cluster
-                .into_iter()
-                .map(|id| Object {
-                    path: candidates[id].path.clone(),
-                    aliases: candidates[id].aliases.clone(),
-                })
-                .collect();
+            let mut objects = Vec::with_capacity(cluster.len());
+            let mut failed = false;
+            for id in cluster {
+                let candidate = &candidates[id];
+                if let Err(e) = revalidate_candidate_path(candidate, &candidate.path) {
+                    record_error(&mut errors, &mut error_count, &candidate.path, &e);
+                    failed = true;
+                    break;
+                }
+                let mut aliases = Vec::new();
+                for alias in &candidate.aliases {
+                    match revalidate_candidate_path(candidate, alias) {
+                        Ok(()) => aliases.push(alias.clone()),
+                        Err(e) => record_error(&mut errors, &mut error_count, alias, &e),
+                    }
+                }
+                objects.push(Object {
+                    path: candidate.path.clone(),
+                    aliases,
+                });
+            }
+            if failed {
+                continue;
+            }
             objects.sort_by(|a, b| a.path.cmp(&b.path));
             groups.push(Group {
                 size,
@@ -343,6 +553,81 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn in_place_change_with_restored_mtime_is_rejected() {
+        let root = std::env::temp_dir().join(format!(
+            "filetree233-duplicates-modified-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("file");
+        fs::write(&path, b"original").unwrap();
+        let mtime = filetime::FileTime::from_last_modification_time(&fs::metadata(&path).unwrap());
+        let (file, before, identity, change) = open_checked(&path, 8).unwrap();
+        let candidate = Candidate {
+            path: path.clone(),
+            aliases: Vec::new(),
+            size: 8,
+            stamp: before,
+            identity,
+            change,
+        };
+        fs::write(&path, b"modified").unwrap();
+        filetime::set_file_mtime(&path, mtime).unwrap();
+        assert_eq!(
+            stamp(&fs::metadata(&path).unwrap()).unwrap().modified,
+            before.modified
+        );
+        assert!(verify_stamp(&path, &file, before, identity, change).is_err());
+        assert!(digest(&candidate, false, &AtomicBool::new(false)).is_err());
+        assert!(revalidate_candidate_path(&candidate, &path).is_err());
+        drop(file);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn replacement_with_same_size_and_modified_time_is_rejected() {
+        let root = std::env::temp_dir().join(format!(
+            "filetree233-duplicates-replaced-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("file");
+        fs::write(&path, b"original").unwrap();
+        let original_mtime =
+            filetime::FileTime::from_last_modification_time(&fs::metadata(&path).unwrap());
+        let (file, before, identity, change) = open_checked(&path, 8).unwrap();
+        let candidate = Candidate {
+            path: path.clone(),
+            aliases: Vec::new(),
+            size: 8,
+            stamp: before,
+            identity,
+            change,
+        };
+        fs::rename(&path, root.join("old")).unwrap();
+        fs::write(&path, b"replaced").unwrap();
+        filetime::set_file_mtime(&path, original_mtime).unwrap();
+        assert_eq!(
+            stamp(&fs::metadata(&path).unwrap()).unwrap().len,
+            before.len
+        );
+        assert_eq!(
+            stamp(&fs::metadata(&path).unwrap()).unwrap().modified,
+            before.modified
+        );
+        assert!(verify_stamp(&path, &file, before, identity, change).is_err());
+        assert!(digest(&candidate, false, &AtomicBool::new(false)).is_err());
+        drop(file);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn demo_finds_content_duplicates_but_not_hardlink_aliases_or_sample_collisions() {
         let root = std::env::temp_dir().join(format!(
