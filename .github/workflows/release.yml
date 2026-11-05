@@ -77,7 +77,7 @@ jobs:
         run: |
           "target/${{ matrix.target }}/release/${{ matrix.exe }}" --version
           cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" "${{ matrix.asset }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
@@ -154,7 +154,7 @@ jobs:
             "$RUNNER_TEMP/$asset/filetree233" --version
             ;;
           esac
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}-installers
           path: dist/*
