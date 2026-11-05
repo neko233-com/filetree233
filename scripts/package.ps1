@@ -4,8 +4,9 @@
 
 .DESCRIPTION
   One-command local packaging for the Windows targets in .github/workflows/release.yml.
-  The MSI needs the WiX v4/v5 command line (dotnet tool install --global wix); when it is
-  missing the script installs it. Nothing is code signed, so SmartScreen warns on first run.
+  The MSI uses a pinned WiX v5 toolset in target\wix, installed on demand; v6 and later
+  demand acceptance of the Open Source Maintenance Fee EULA. Nothing is code signed, so
+  SmartScreen warns on first run.
 
 .EXAMPLE
   ./scripts/package.ps1
@@ -47,22 +48,17 @@ foreach ($document in 'README.md', 'CHANGELOG.md', 'RELEASE_NOTES.md') {
 Compress-Archive -Path "$staging\*" -DestinationPath "dist\$asset.zip" -Force
 Remove-Item -Recurse -Force $staging
 
-# MSI through the WiX command line.
-$wix = Get-Command wix.exe -ErrorAction SilentlyContinue
-if (-not $wix) {
-    # A freshly installed dotnet tool is not on this session's PATH, so resolve it by file.
-    $local = Join-Path $env:USERPROFILE '.dotnet\tools\wix.exe'
-    if (-not (Test-Path $local)) {
-        Write-Warning 'wix.exe not found; installing the WiX toolset as a dotnet tool'
-        dotnet tool install --global wix
-        if ($LASTEXITCODE -ne 0) {
-            throw 'install WiX v4 or later (dotnet tool install --global wix) and run this script again'
-        }
-    }
-    if (-not (Test-Path $local)) { throw 'wix.exe is still missing; install WiX v4 or later and retry' }
-    $wix = Get-Command $local
+# MSI through the pinned WiX command line. v6 and later refuse to run until the
+# Open Source Maintenance Fee EULA is accepted, so builds stay on v5.
+$wixRoot = Join-Path $PWD 'target\wix'
+$wix = Join-Path $wixRoot 'wix.exe'
+if (-not (Test-Path $wix)) {
+    Write-Warning 'wix.exe not found; installing the WiX v5 toolset into target\wix'
+    dotnet tool install wix --version '5.*' --tool-path $wixRoot
+    if ($LASTEXITCODE -ne 0) { throw 'could not install the WiX v5 toolset; install the .NET SDK and retry' }
 }
-& $wix.Source build 'packaging\windows\filetree233.wxs' `
+if (-not (Test-Path $wix)) { throw 'wix.exe is still missing after installation; retry the script' }
+& $wix build 'packaging\windows\filetree233.wxs' `
     -arch $arch `
     -o "dist\$asset.msi" `
     -d "ProductVersion=$msiVersion" `

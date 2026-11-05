@@ -2561,14 +2561,28 @@ mod tests {
         assert!(!out.shapes.is_empty());
         assert!(app.tree.is_some());
         assert!(!app.treemap_tiles.is_empty());
-        let tile = app
-            .treemap_tiles
-            .iter()
-            .find(|t| !t.remainder && !app.tree.as_ref().unwrap().nodes[t.id as usize].is_dir)
-            .unwrap();
-        let position = tile.rect.center();
-        let expected = app.tree.as_ref().unwrap().path(tile.id);
-        let marked_id = tile.id;
+        let file_tile = |app: &App| {
+            app.treemap_tiles
+                .iter()
+                .find(|t| !t.remainder && !app.tree.as_ref().unwrap().nodes[t.id as usize].is_dir)
+                .map(|t| (t.id, t.rect.center()))
+                .unwrap()
+        };
+        let marked_id = file_tile(&app).0;
+        // Panels can settle on the first pass, which moves the tiles; click where the
+        // latest layout draws the tile rather than at the first frame's position.
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1100.0, 720.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| app.show_tree(ctx),
+        );
+        let position = file_tile(&app).1;
+        let expected = app.tree.as_ref().unwrap().path(marked_id);
         let input = |pressed| egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -2587,7 +2601,11 @@ mod tests {
         };
         let _ = ctx.run(input(true), |ctx| app.show_tree(ctx));
         let _ = ctx.run(input(false), |ctx| app.show_tree(ctx));
-        assert!(app.marked.contains(&marked_id));
+        assert!(
+            app.marked.contains(&marked_id),
+            "click at {position:?} should mark tile {marked_id} ({expected:?}); marks: {:?}",
+            app.marked
+        );
         assert_eq!(app.focus, Some(marked_id));
         let tree = app.tree.as_ref().unwrap();
         assert!(app.plan_inputs(tree).contains(&expected));
