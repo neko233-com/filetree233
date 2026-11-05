@@ -1016,7 +1016,7 @@ impl eframe::App for App {
                     ui.add_space(4.0);
                     egui::Frame::new()
                         .fill(SURFACE)
-                        .stroke(Stroke::new(1.0, DANGER.gamma_multiply(0.7)))
+                        .stroke(Stroke::new(1.0_f32, DANGER.gamma_multiply(0.7)))
                         .corner_radius(CornerRadius::same(8))
                         .inner_margin(Margin::same(8))
                         .show(ui, |ui| {
@@ -1071,7 +1071,7 @@ impl eframe::App for App {
                     ui.vertical_centered(|ui| {
                         egui::Frame::new()
                             .fill(SURFACE)
-                            .stroke(Stroke::new(1.0, STROKE))
+                            .stroke(Stroke::new(1.0_f32, STROKE))
                             .corner_radius(CornerRadius::same(12))
                             .inner_margin(Margin::same(26))
                             .show(ui, |ui| {
@@ -1585,7 +1585,7 @@ impl App {
                         ui.painter().rect_stroke(
                             body,
                             CornerRadius::same(3),
-                            Stroke::new(1.2, ACCENT_STRONG.gamma_multiply(0.8)),
+                            Stroke::new(1.2_f32, ACCENT_STRONG.gamma_multiply(0.8)),
                             egui::StrokeKind::Inside,
                         );
                     }

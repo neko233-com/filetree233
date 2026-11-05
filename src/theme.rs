@@ -71,7 +71,7 @@ fn visuals() -> Visuals {
     visuals.hyperlink_color = ACCENT;
     visuals.warn_fg_color = AMBER;
     visuals.error_fg_color = DANGER;
-    visuals.window_stroke = Stroke::new(1.0, STROKE);
+    visuals.window_stroke = Stroke::new(1.0_f32, STROKE);
     visuals.window_corner_radius = CornerRadius::same(10);
     visuals.menu_corner_radius = CornerRadius::same(8);
     visuals.window_shadow = Shadow {
@@ -82,8 +82,8 @@ fn visuals() -> Visuals {
     };
     visuals.popup_shadow = visuals.window_shadow;
     visuals.selection.bg_fill = ACCENT.gamma_multiply(0.30);
-    visuals.selection.stroke = Stroke::new(1.0, ACCENT_STRONG);
-    visuals.text_cursor.stroke = Stroke::new(1.5, ACCENT_STRONG);
+    visuals.selection.stroke = Stroke::new(1.0_f32, ACCENT_STRONG);
+    visuals.text_cursor.stroke = Stroke::new(1.5_f32, ACCENT_STRONG);
     visuals.striped = true;
     visuals.slider_trailing_fill = true;
     visuals.indent_has_left_vline = false;
@@ -92,32 +92,32 @@ fn visuals() -> Visuals {
     let widgets = &mut visuals.widgets;
     widgets.noninteractive.bg_fill = PANEL;
     widgets.noninteractive.weak_bg_fill = PANEL;
-    widgets.noninteractive.bg_stroke = Stroke::new(1.0, STROKE);
-    widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
+    widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, STROKE);
+    widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT);
     widgets.noninteractive.corner_radius = CornerRadius::same(6);
 
     widgets.inactive.bg_fill = SURFACE;
     widgets.inactive.weak_bg_fill = SURFACE;
-    widgets.inactive.bg_stroke = Stroke::new(1.0, STROKE);
-    widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT);
+    widgets.inactive.bg_stroke = Stroke::new(1.0_f32, STROKE);
+    widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT);
     widgets.inactive.corner_radius = CornerRadius::same(6);
 
     widgets.hovered.bg_fill = SURFACE_HOVER;
     widgets.hovered.weak_bg_fill = SURFACE_HOVER;
-    widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT.gamma_multiply(0.65));
-    widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT);
+    widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.65));
+    widgets.hovered.fg_stroke = Stroke::new(1.0_f32, TEXT);
     widgets.hovered.corner_radius = CornerRadius::same(6);
 
     widgets.active.bg_fill = ACCENT.gamma_multiply(0.55).to_opaque();
     widgets.active.weak_bg_fill = ACCENT.gamma_multiply(0.55).to_opaque();
-    widgets.active.bg_stroke = Stroke::new(1.0, ACCENT);
-    widgets.active.fg_stroke = Stroke::new(1.0, TEXT);
+    widgets.active.bg_stroke = Stroke::new(1.0_f32, ACCENT);
+    widgets.active.fg_stroke = Stroke::new(1.0_f32, TEXT);
     widgets.active.corner_radius = CornerRadius::same(6);
 
     widgets.open.bg_fill = SURFACE_HOVER;
     widgets.open.weak_bg_fill = SURFACE_HOVER;
-    widgets.open.bg_stroke = Stroke::new(1.0, STROKE);
-    widgets.open.fg_stroke = Stroke::new(1.0, TEXT);
+    widgets.open.bg_stroke = Stroke::new(1.0_f32, STROKE);
+    widgets.open.fg_stroke = Stroke::new(1.0_f32, TEXT);
     widgets.open.corner_radius = CornerRadius::same(6);
     visuals
 }
@@ -188,7 +188,7 @@ fn cjk_fonts() -> &'static [(&'static str, &'static str)] {
 pub fn card() -> egui::Frame {
     egui::Frame::new()
         .fill(SURFACE)
-        .stroke(Stroke::new(1.0, STROKE))
+        .stroke(Stroke::new(1.0_f32, STROKE))
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::same(10))
 }
