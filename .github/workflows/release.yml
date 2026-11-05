@@ -124,6 +124,7 @@ jobs:
           Darwin)
             asset="filetree233-macos-$arch"
             mount="$RUNNER_TEMP/ft233-mount"
+            mkdir -p "$mount"
             hdiutil attach -nobrowse -quiet -mountpoint "$mount" "dist/$asset.dmg"
             trap 'hdiutil detach -quiet "$mount" || true' EXIT
             test -x "$mount/Filetree233.app/Contents/MacOS/filetree233"

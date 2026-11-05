@@ -35,7 +35,7 @@ Darwin)
   stage="dist/stage-$arch"
   rm -rf "$stage" "dist/$asset.dmg"
   mkdir -p "$stage/$bundle/Contents/MacOS" "$stage/$bundle/Contents/Resources"
-  sed -e "s/@VERSION@/$short/" -e "s/@BUILD@/$version/" \
+  sed -e "s/@VERSION@/$short/" -e "s/@BUILD@/$short/" \
     packaging/macos/Info.plist >"$stage/$bundle/Contents/Info.plist"
   echo "APPL????" >"$stage/$bundle/Contents/PkgInfo"
   cp "$bin" "$stage/$bundle/Contents/MacOS/filetree233"
