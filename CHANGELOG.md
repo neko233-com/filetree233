@@ -4,6 +4,8 @@
 
 - Add production gates on every push and pull request: formatting, clippy with warnings denied, CLI and GUI tests, an MSRV 1.95 check and a RustSec dependency audit. Dependabot keeps Cargo and GitHub Actions dependencies current.
 - Add the MIT license, `SECURITY.md` and `CONTRIBUTING.md`, fill in crates.io metadata and enable thin LTO with symbol stripping for release builds.
+- Opening the GUI from Explorer or the Start Menu no longer leaves a console window behind; a console shared with a terminal is kept for CLI output.
+- The Start Menu shortcut is now named `filetree233` instead of `filetree233 treemap`.
 
 ## 0.1.0 — 2026-11-05
 

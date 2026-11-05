@@ -17,6 +17,20 @@ use std::{
     thread,
 };
 
+#[cfg(windows)]
+fn release_owned_console() {
+    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    // Explorer and the Start Menu give the console-subsystem exe a console of
+    // its own; detaching closes that window or terminal tab. A console shared
+    // with a terminal stays so CLI output works.
+    unsafe {
+        let mut processes = [0u32; 2];
+        if GetConsoleProcessList(processes.as_mut_ptr(), processes.len() as u32) == 1 {
+            FreeConsole();
+        }
+    }
+}
+
 pub fn run(path: Option<&std::path::Path>, threads: u8) -> Result<(), String> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1180.0, 760.0])
@@ -33,6 +47,8 @@ pub fn run(path: Option<&std::path::Path>, threads: u8) -> Result<(), String> {
         "filetree233",
         options,
         Box::new(move |cc| {
+            #[cfg(windows)]
+            release_owned_console();
             crate::theme::apply(&cc.egui_ctx);
             let mut app = App {
                 threads,

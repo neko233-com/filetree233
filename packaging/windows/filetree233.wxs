@@ -36,7 +36,7 @@
                      Permanent="no" Part="last" Action="set" System="yes" />
       </Component>
       <Component Id="StartMenu" Guid="*">
-        <Shortcut Id="TreemapShortcut" Directory="ProgramMenuFolder" Name="filetree233 treemap"
+        <Shortcut Id="AppShortcut" Directory="ProgramMenuFolder" Name="filetree233"
                   Target="[INSTALLFOLDER]filetree233.exe" Arguments="gui"
                   WorkingDirectory="INSTALLFOLDER" Icon="AppIcon.ico" />
         <RemoveFolder Id="RemoveStartMenuFolder" Directory="ProgramMenuFolder" On="uninstall" />
