@@ -1,4 +1,4 @@
-param([string]$InstallDir = "$env:LOCALAPPDATA\Programs\filetree233", [string]$Version = "v0.1.0-alpha.1")
+param([string]$InstallDir = "$env:LOCALAPPDATA\Programs\filetree233", [string]$Version = "v0.1.0")
 $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid version.' }
 $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()

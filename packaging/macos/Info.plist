@@ -6,6 +6,8 @@
 	<string>en</string>
 	<key>CFBundleExecutable</key>
 	<string>filetree233</string>
+	<key>CFBundleIconFile</key>
+	<string>Filetree233</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.neko233.filetree233</string>
 	<key>CFBundleInfoDictionaryVersion</key>

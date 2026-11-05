@@ -22,24 +22,24 @@ impl Kind {
     /// Muted base colours; the treemap lightens them with depth.
     pub fn color(self) -> Color32 {
         match self {
-            Kind::Source => Color32::from_rgb(74, 104, 148),
-            Kind::Build => Color32::from_rgb(88, 122, 112),
-            Kind::Dependencies => Color32::from_rgb(104, 96, 132),
-            Kind::Cache => Color32::from_rgb(118, 112, 98),
-            Kind::VirtualEnv => Color32::from_rgb(96, 116, 82),
-            Kind::VersionControl => Color32::from_rgb(132, 104, 78),
-            Kind::Media => Color32::from_rgb(126, 92, 122),
-            Kind::Documents => Color32::from_rgb(86, 118, 134),
-            Kind::Archives => Color32::from_rgb(122, 96, 84),
-            Kind::Logs => Color32::from_rgb(104, 104, 104),
-            Kind::Other => Color32::from_rgb(92, 100, 110),
+            Kind::Source => Color32::from_rgb(92, 138, 196),
+            Kind::Build => Color32::from_rgb(86, 152, 130),
+            Kind::Dependencies => Color32::from_rgb(132, 120, 184),
+            Kind::Cache => Color32::from_rgb(150, 138, 108),
+            Kind::VirtualEnv => Color32::from_rgb(118, 152, 94),
+            Kind::VersionControl => Color32::from_rgb(182, 132, 88),
+            Kind::Media => Color32::from_rgb(176, 112, 166),
+            Kind::Documents => Color32::from_rgb(92, 150, 178),
+            Kind::Archives => Color32::from_rgb(172, 126, 96),
+            Kind::Logs => Color32::from_rgb(130, 134, 140),
+            Kind::Other => Color32::from_rgb(112, 126, 144),
         }
     }
 }
 
 /// Mix `color` toward white by `level` (0 = base tone) to separate nesting depth.
 pub fn shade(color: Color32, level: usize) -> Color32 {
-    let step = level.min(6) as f32 / 6.0 * 0.45;
+    let step = level.min(6) as f32 / 6.0 * 0.35;
     let mix = |channel: u8| channel as f32 + (255.0 - channel as f32) * step;
     Color32::from_rgb(
         mix(color.r()).round() as u8,
@@ -62,7 +62,9 @@ pub fn classify(name: &OsStr, is_dir: bool) -> Kind {
     if is_dir {
         return match base {
             ".git" | ".svn" | ".hg" => Kind::VersionControl,
-            "node_modules" | "vendor" | ".pnpm-store" | "site-packages" => Kind::Dependencies,
+            "node_modules" | "vendor" | ".pnpm-store" | "site-packages" | "deps" => {
+                Kind::Dependencies
+            }
             ".venv" | "venv" | "virtualenv" | ".conda" | "miniconda3" | "anaconda3" => {
                 Kind::VirtualEnv
             }
@@ -70,6 +72,8 @@ pub fn classify(name: &OsStr, is_dir: bool) -> Kind {
             | "build"
             | "dist"
             | "out"
+            | "debug"
+            | "release"
             | ".gradle"
             | ".cxx"
             | "cmake-build-debug"
@@ -85,7 +89,7 @@ pub fn classify(name: &OsStr, is_dir: bool) -> Kind {
             | ".dotnet"
             | ".terragrunt-cache" => Kind::Build,
             ".cache" | "cache" | "caches" | "tmp" | ".npm" | ".nuget" | ".cargo" | "crashdumps"
-            | "sentry" => Kind::Cache,
+            | "sentry" | "incremental" | ".fingerprint" => Kind::Cache,
             "logs" | "log" => Kind::Logs,
             "pictures" | "photos" | "music" | "videos" | "movies" | "camera" => Kind::Media,
             "documents" | "docs" | "desktop" | "downloads" => Kind::Documents,

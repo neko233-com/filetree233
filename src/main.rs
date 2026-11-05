@@ -16,6 +16,8 @@ mod plan_fingerprint;
 mod recommend;
 mod recycle;
 mod search;
+#[cfg(feature = "gui")]
+mod theme;
 mod tree;
 #[cfg(feature = "gui")]
 mod treemap;

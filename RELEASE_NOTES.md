@@ -1,10 +1,19 @@
-# Unreleased
+# filetree233 0.1.0
 
-filetree233 provides command-line disk analysis, an optional treemap desktop app and an MCP stdio server. This is an early preview and is not yet a full replacement for WizTree.
+filetree233 provides command-line disk analysis, a bilingual treemap desktop app and an MCP stdio server. This is the first stable release; Windows is the primary desktop target for this milestone.
 
-- Scan directories, list volumes, export a tree, search, find duplicate contents, and review cleanup suggestions.
-- Create a cleanup plan with logical and allocated sizes; applying it requires human confirmation and revalidation. Recycle is the default; permanent deletion is explicit.
-- `filetree233 gui` opens the squarified treemap: colours classify entries by name, hatching marks where a cleanup rule suggests the space could be had back, and marking then planning reuses the command-line plan, confirmation code and revalidation. The interface is bilingual (English and Chinese) and picks the operating system language on first launch; `--lang en|zh` and the button in the toolbar override it. The GUI is an opt-in cargo feature, so command-line builds need no graphics dependencies.
-- Windows, Linux and macOS builds target x64 and ARM64. Each release now also carries installers: Windows MSI and zip, macOS DMG, and a Linux tar.gz that keeps the command line only, avoiding display-server dependencies. Install scripts validate SHA-256 checksums.
+Highlights
 
-Limitations: experimental Windows NTFS MFT results are incomplete; allocated bytes do not guarantee reclaimable space, and filesystem races remain possible. Classification, hatching and suggestions are hints and never authorize deletion. Installers are unsigned and not notarized, so SmartScreen and Gatekeeper warn on first launch. Real-drive performance and release installation must be verified separately on each platform. See README.md for details.
+- A redesigned desktop app: charcoal-and-teal dark theme, system fonts, card-based inspector, custom tree rows with painted icons, clickable breadcrumbs, a segmented Size / On disk / Files switch, rounded treemap tiles and clear empty and scanning states. The interface follows the operating-system language on first launch; `--lang en|zh` and the header button override it.
+- Treemap colours classify entries by name, three levels are drawn by default, and hatching marks where a cleanup rule suggests space could be had back. Classification, hatching and suggestions remain hints and never authorize deletion.
+- Marked entries feed the same plan, human confirmation code and revalidation pipeline as the command line. There is no second deletion path; nothing is selected or deleted automatically.
+- Windows executables carry an application icon plus FileVersion/ProductVersion metadata. The window, Start Menu shortcut and Add/Remove Programs entry share the icon. macOS bundles carry a native `.icns` icon.
+- Installers: Windows MSI and portable zip, macOS DMG, Linux tar.gz (command line only). All six x64/ARM64 assets are checksummed with SHA256SUMS; installer scripts now default to `v0.1.0`.
+
+Upgrade note
+
+The previous `0.1.0-alpha.1` MSI reports ProductVersion `0.1.0`, the same numeric version as this release, so Windows Installer cannot major-upgrade it in place. Uninstall the preview before installing 0.1.0.
+
+Limitations
+
+Experimental Windows NTFS MFT results are incomplete. Allocated bytes do not guarantee reclaimable space, and filesystem races remain possible. Installers are unsigned and not notarized, so SmartScreen and Gatekeeper warn on first launch. See README.md for installation, verification and rollback details.

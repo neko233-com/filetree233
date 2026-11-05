@@ -28,6 +28,7 @@ impl Server {
         let flag = running.clone();
         let mode = state.clone();
         let hash = format!("{:x}", Sha256::digest(&binary));
+        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
         let handle = thread::spawn(move || {
             while flag.load(Ordering::Relaxed) {
                 match listener.accept() {
@@ -54,7 +55,7 @@ impl Server {
                             .next()
                             .and_then(|line| line.split_whitespace().nth(1))
                             .unwrap_or("");
-                        let expected_file = format!("/v0.1.0-alpha.1/{name}");
+                        let expected_file = format!("/{version}/{name}");
                         if path == expected_file {
                             if mode
                                 .compare_exchange(3, 0, Ordering::Relaxed, Ordering::Relaxed)
@@ -64,7 +65,7 @@ impl Server {
                             } else {
                                 respond(&mut stream, &binary);
                             }
-                        } else if path == "/v0.1.0-alpha.1/SHA256SUMS" {
+                        } else if path == format!("/{version}/SHA256SUMS") {
                             let row = format!(
                                 "{}  {}\n",
                                 if mode.load(Ordering::Relaxed) == 1 {
@@ -150,6 +151,7 @@ fn asset_name() -> &'static str {
     }
 }
 fn install(base: &str, dir: &Path) -> std::process::Output {
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
     #[cfg(windows)]
     let mut cmd = {
         let mut command = Command::new("pwsh");
@@ -160,9 +162,9 @@ fn install(base: &str, dir: &Path) -> std::process::Output {
                 "-File",
                 "scripts/install.ps1",
                 "-Version",
-                "v0.1.0-alpha.1",
-                "-InstallDir",
             ])
+            .arg(&version)
+            .arg("-InstallDir")
             .arg(dir);
         command
     };
@@ -171,7 +173,7 @@ fn install(base: &str, dir: &Path) -> std::process::Output {
         let mut command = Command::new("sh");
         command
             .arg("scripts/install.sh")
-            .env("FILETREE233_VERSION", "v0.1.0-alpha.1")
+            .env("FILETREE233_VERSION", version)
             .env("FILETREE233_INSTALL_DIR", dir);
         command
     };
@@ -190,9 +192,9 @@ fn install_legacy_powershell(base: &str, dir: &Path) -> std::process::Output {
             "-File",
             "scripts/install.ps1",
             "-Version",
-            "v0.1.0-alpha.1",
-            "-InstallDir",
         ])
+        .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+        .arg("-InstallDir")
         .arg(dir)
         .env("FILETREE233_RELEASE_BASE", base)
         .env("NO_PROXY", "127.0.0.1,localhost")

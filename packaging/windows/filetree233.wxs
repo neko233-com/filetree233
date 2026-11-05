@@ -11,6 +11,11 @@
            UpgradeCode="{3e2f0d7c-6b1a-4f4d-9a3c-8f2b5d1e7a60}">
     <MajorUpgrade DowngradeErrorMessage="A newer version of filetree233 is already installed." />
     <MediaTemplate EmbedCab="yes" />
+    <Icon Id="AppIcon.ico" SourceFile="packaging\windows\filetree233.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
+    <Property Id="ARPCOMMENTS" Value="Disk space explorer and human-confirmed cleanup" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/neko233-com/filetree233" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/neko233-com/filetree233" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="filetree233" />
@@ -33,10 +38,17 @@
       <Component Id="StartMenu" Guid="*">
         <Shortcut Id="TreemapShortcut" Directory="ProgramMenuFolder" Name="filetree233 treemap"
                   Target="[INSTALLFOLDER]filetree233.exe" Arguments="gui"
-                  WorkingDirectory="INSTALLFOLDER" />
+                  WorkingDirectory="INSTALLFOLDER" Icon="AppIcon.ico" />
         <RemoveFolder Id="RemoveStartMenuFolder" Directory="ProgramMenuFolder" On="uninstall" />
         <RegistryValue Root="HKCU" Key="Software\neko233\filetree233" Name="startMenu"
                        Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <!-- Windows Installer did not publish DisplayIcon from ARPPRODUCTICON here, so
+           point Add/Remove Programs at the executable's embedded icon explicitly. -->
+      <Component Id="ArpDisplayIcon" Guid="{7c1a4c62-9f0e-4f36-8a2e-2d6e5c9b1a11}" Directory="INSTALLFOLDER">
+        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\[ProductCode]"
+                       Name="DisplayIcon" Type="string" Value="[INSTALLFOLDER]filetree233.exe,0"
+                       KeyPath="yes" />
       </Component>
     </ComponentGroup>
   </Fragment>

@@ -101,6 +101,14 @@ jobs:
           $actual = & $installed --version
           $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
           if ($actual -ne "filetree233 $version") { throw "installed version '$actual' does not match Cargo.toml '$version'" }
+          $info = (Get-Item $installed).VersionInfo
+          if ($info.ProductVersion -notlike "$version*") { throw "exe ProductVersion '$($info.ProductVersion)' does not match '$version'" }
+          if (-not $info.FileDescription) { throw 'exe has no FileDescription resource' }
+          $shortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\filetree233 treemap.lnk'
+          if (-not (Test-Path $shortcut)) { throw "missing Start Menu shortcut: $shortcut" }
+          $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
+          if ($link.TargetPath -ne $installed) { throw "shortcut target '$($link.TargetPath)' is not '$installed'" }
+          if (-not $link.IconLocation) { throw 'Start Menu shortcut has no icon' }
       - name: Package macOS and Linux installers
         if: runner.os != 'Windows'
         shell: bash
@@ -128,6 +136,8 @@ jobs:
             hdiutil attach -nobrowse -quiet -mountpoint "$mount" "dist/$asset.dmg"
             trap 'hdiutil detach -quiet "$mount" || true' EXIT
             test -x "$mount/Filetree233.app/Contents/MacOS/filetree233"
+            test -f "$mount/Filetree233.app/Contents/Resources/Filetree233.icns"
+            test "$(plutil -extract CFBundleIconFile raw "$mount/Filetree233.app/Contents/Info.plist")" = Filetree233
             "$mount/Filetree233.app/Contents/MacOS/filetree233" --version
             ;;
           Linux)

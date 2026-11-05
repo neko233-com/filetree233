@@ -3,7 +3,9 @@ use crate::{
     CleanupMode, ScanEngine, delete_checked, plan_description, read_checked_plan, save_plan_mode,
     scan_dispatch,
 };
-use eframe::egui::{self, Color32, RichText, Sense, Vec2, pos2};
+use eframe::egui::{
+    self, Align, Color32, CornerRadius, Layout, Margin, Rect, RichText, Sense, Stroke, Vec2, pos2,
+};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -16,10 +18,14 @@ use std::{
 };
 
 pub fn run(path: Option<&std::path::Path>, threads: u8) -> Result<(), String> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1180.0, 760.0])
+        .with_min_inner_size([860.0, 540.0]);
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 720.0])
-            .with_min_inner_size([700.0, 450.0]),
+        viewport,
         ..Default::default()
     };
     let start = path.map(|p| p.to_path_buf());
@@ -27,7 +33,7 @@ pub fn run(path: Option<&std::path::Path>, threads: u8) -> Result<(), String> {
         "filetree233",
         options,
         Box::new(move |cc| {
-            install_system_font(&cc.egui_ctx);
+            crate::theme::apply(&cc.egui_ctx);
             let mut app = App {
                 threads,
                 ..Default::default()
@@ -40,37 +46,6 @@ pub fn run(path: Option<&std::path::Path>, threads: u8) -> Result<(), String> {
         }),
     )
     .map_err(|e| e.to_string())
-}
-fn install_system_font(ctx: &egui::Context) {
-    #[cfg(windows)]
-    let candidates = [r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simsun.ttc"];
-    #[cfg(target_os = "linux")]
-    let candidates = [
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-    ];
-    #[cfg(target_os = "macos")]
-    let candidates = ["/System/Library/Fonts/PingFang.ttc"];
-    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    let candidates: [&str; 0] = [];
-    for path in candidates {
-        if let Ok(bytes) = std::fs::read(path) {
-            let mut fonts = egui::FontDefinitions::default();
-            fonts.font_data.insert(
-                "system-cjk".into(),
-                egui::FontData::from_owned(bytes).into(),
-            );
-            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-                fonts
-                    .families
-                    .entry(family)
-                    .or_default()
-                    .push("system-cjk".into());
-            }
-            ctx.set_fonts(fonts);
-            break;
-        }
-    }
 }
 fn raw_entry_path(entry: &serde_json::Value) -> Option<PathBuf> {
     let units = entry.get("path_units")?.as_array()?;
@@ -105,6 +80,64 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{value:.1} {}", UNITS[unit])
     }
+}
+fn window_icon() -> Option<egui::IconData> {
+    let image = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        .ok()?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    Some(egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
+}
+/// Drop the verbatim `\\?\` prefix that Windows paths carry in the snapshot.
+fn pretty_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    if let Some(rest) = text.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{rest}")
+    } else if let Some(rest) = text.strip_prefix("\\\\?\\") {
+        rest.to_owned()
+    } else {
+        text
+    }
+}
+/// A flat folder glyph, 12 by 10 points.
+fn paint_folder(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let body = Rect::from_min_max(
+        pos2(rect.min.x, rect.min.y + 2.0),
+        pos2(rect.max.x, rect.max.y),
+    );
+    let tab = Rect::from_min_max(
+        rect.min,
+        pos2(rect.min.x + rect.width() * 0.45, rect.min.y + 3.0),
+    );
+    painter.rect_filled(tab, CornerRadius::same(1), color);
+    painter.rect_filled(body, CornerRadius::same(2), color);
+}
+/// A page glyph with a folded corner, 10 by 12 points.
+fn paint_file(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let page = Rect::from_min_max(pos2(rect.min.x, rect.min.y), pos2(rect.max.x, rect.max.y));
+    painter.rect_filled(page, CornerRadius::same(2), color);
+    painter.rect_filled(
+        Rect::from_min_max(
+            pos2(page.max.x - 3.5, page.min.y),
+            pos2(page.max.x, page.min.y + 3.5),
+        ),
+        CornerRadius::same(1),
+        Color32::from_black_alpha(70),
+    );
+}
+/// A card with a quiet title, used by the inspector column.
+fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
+    crate::theme::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(title).size(11.5).strong().color(MUTED));
+        ui.add_space(2.0);
+        body(ui);
+    });
+    ui.add_space(8.0);
 }
 fn parent_id(tree: &crate::tree::Snapshot, id: u32) -> Option<u32> {
     let parent = tree.nodes[id as usize].parent;
@@ -146,9 +179,16 @@ fn tile_weight(node: &crate::tree::Node, metric: Metric, hide_dot: bool) -> u64 
         Metric::Files => node.files,
     }
 }
-const AMBER: Color32 = Color32::from_rgb(214, 168, 74);
-const DANGER: Color32 = Color32::from_rgb(150, 74, 68);
-const HATCH: Color32 = Color32::from_rgb(232, 226, 210);
+const AMBER: Color32 = crate::theme::AMBER;
+const DANGER: Color32 = crate::theme::DANGER;
+const HATCH: Color32 = crate::theme::HATCH;
+const ACCENT: Color32 = crate::theme::ACCENT;
+const ACCENT_STRONG: Color32 = crate::theme::ACCENT_STRONG;
+const MUTED: Color32 = crate::theme::MUTED;
+const FAINT: Color32 = crate::theme::FAINT;
+const BG: Color32 = crate::theme::BG;
+const SURFACE: Color32 = crate::theme::SURFACE;
+const STROKE: Color32 = crate::theme::STROKE;
 /// Diagonal hatching marks space a cleanup suggestion says could be had back.
 fn paint_hatch(ui: &egui::Ui, rect: egui::Rect) {
     let spacing = 9.0_f32;
@@ -307,7 +347,7 @@ impl Default for App {
             treemap_tiles: Vec::new(),
             treemap_state: None,
             metric: Metric::Logical,
-            depth: 2,
+            depth: 3,
             hide_dot: false,
             marked: HashSet::new(),
             suggestions: HashSet::new(),
@@ -447,8 +487,8 @@ impl App {
         });
     }
     fn set_tree_path(&mut self, path: &std::path::Path) {
-        if let Some(text) = path.to_str() {
-            self.path = text.to_owned();
+        if path.to_str().is_some() {
+            self.path = pretty_path(path);
         } else {
             self.status = t("This path cannot be represented in the text field; navigation remains in the current snapshot", "该路径无法显示在文本框内；导航仍在当前快照中进行").into();
         }
@@ -627,8 +667,8 @@ impl eframe::App for App {
         {
             match result {
                 Ok(ScanResult::Tree(tree)) => {
-                    let root_representable = if let Some(text) = tree.root.to_str() {
-                        self.path = text.to_owned();
+                    let root_representable = if tree.root.to_str().is_some() {
+                        self.path = pretty_path(&tree.root);
                         true
                     } else {
                         false
@@ -770,84 +810,181 @@ impl eframe::App for App {
         if self.duplicate_rx.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.heading("filetree233");
-            self.volume_picker(ui, ctx);
-            ui.horizontal(|ui| {
-                ui.label(t("Directory", "目录"));
-                ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(600.0));
-                if ui.button(t("Scan", "扫描")).clicked() {
-                    self.begin_scan(ctx);
-                }
-                if ui.button(t("Up", "上级")).clicked() {
-                    self.goto_parent(ctx);
-                }
-                if self.rx.is_some()
-                    && self.scan_is_tree
-                    && ui.button(t("Cancel", "取消")).clicked()
-                {
-                    self.cancelled.store(true, Ordering::Relaxed);
-                }
-            });
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_label(t("Engine", "引擎"))
-                    .selected_text(format!("{:?}", self.engine))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.engine, ScanEngine::Walk, t("Walk", "遍历"));
-                        ui.selectable_value(
-                            &mut self.engine,
-                            ScanEngine::Mft,
-                            t("MFT (experimental)", "MFT（实验性）"),
-                        );
-                        ui.selectable_value(
-                            &mut self.engine,
-                            ScanEngine::Auto,
-                            t("Auto (experimental)", "自动（实验性）"),
-                        );
-                    });
-                ui.checkbox(&mut self.full_tree, t("Full tree", "完整树"));
-                if self.rx.is_some() && self.scan_is_tree {
-                    ui.label(crate::t_format!(
-                        "{} entries",
-                        "{} 个条目",
-                        self.progress.load(Ordering::Relaxed)
-                    ));
-                    ctx.request_repaint_after(std::time::Duration::from_millis(250));
-                }
-                ui.label(t("Workers", "线程"));
-                ui.add(egui::DragValue::new(&mut self.threads).range(1..=32));
-                ui.label(t("Filter", "筛选"));
-                ui.text_edit_singleline(&mut self.filter);
-                ui.label(&self.status);
-            });
-        });
-        egui::TopBottomPanel::bottom("bottom")
-            .resizable(true)
+        egui::TopBottomPanel::top("top")
+            .frame(
+                egui::Frame::new()
+                    .fill(crate::theme::PANEL)
+                    .inner_margin(Margin::symmetric(14, 10)),
+            )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(t("Export file", "导出文件"));
-                    ui.add(egui::TextEdit::singleline(&mut self.export_path).desired_width(420.0));
+                    ui.label(
+                        RichText::new("filetree233")
+                            .size(19.0)
+                            .strong()
+                            .color(crate::theme::TEXT),
+                    );
+                    ui.label(
+                        RichText::new(t("disk space explorer", "磁盘空间透视"))
+                            .size(12.0)
+                            .color(MUTED),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let next_language = match crate::i18n::current() {
+                            crate::i18n::Lang::Zh => crate::i18n::Lang::En,
+                            crate::i18n::Lang::En => crate::i18n::Lang::Zh,
+                        };
+                        let next_label = match next_language {
+                            crate::i18n::Lang::Zh => "中文",
+                            crate::i18n::Lang::En => "English",
+                        };
+                        if ui
+                            .small_button(next_label)
+                            .on_hover_text(t("Switch interface language", "切换界面语言"))
+                            .clicked()
+                        {
+                            crate::i18n::set(next_language);
+                        }
+                        if ui
+                            .small_button("?")
+                            .on_hover_text(t("Keys and help", "快捷键与帮助"))
+                            .clicked()
+                        {
+                            self.help_open = true;
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    self.volume_picker(ui, ctx);
+                    ui.separator();
+                    ui.label(RichText::new(t("Directory", "目录")).color(MUTED));
+                    let edit_width = (ui.available_width() - 250.0).max(150.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.path)
+                            .desired_width(edit_width)
+                            .hint_text(t("Type or paste a folder", "输入或粘贴文件夹路径")),
+                    );
+                    let scan = egui::Button::new(
+                        RichText::new(t("Scan", "扫描"))
+                            .strong()
+                            .color(crate::theme::ACCENT_INK),
+                    )
+                    .fill(ACCENT)
+                    .min_size(Vec2::new(72.0, 26.0));
+                    if ui.add(scan).clicked() {
+                        self.begin_scan(ctx);
+                    }
+                    if ui.button(t("Up", "上级")).clicked() {
+                        self.goto_parent(ctx);
+                    }
+                    if self.rx.is_some()
+                        && self.scan_is_tree
+                        && ui.button(t("Cancel", "取消")).clicked()
+                    {
+                        self.cancelled.store(true, Ordering::Relaxed);
+                    }
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(t("Engine", "引擎")).color(MUTED));
+                    egui::ComboBox::from_id_salt("engine")
+                        .width(150.0)
+                        .selected_text(format!("{:?}", self.engine))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.engine,
+                                ScanEngine::Walk,
+                                t("Walk", "遍历"),
+                            );
+                            ui.selectable_value(
+                                &mut self.engine,
+                                ScanEngine::Mft,
+                                t("MFT (experimental)", "MFT（实验性）"),
+                            );
+                            ui.selectable_value(
+                                &mut self.engine,
+                                ScanEngine::Auto,
+                                t("Auto (experimental)", "自动（实验性）"),
+                            );
+                        });
+                    ui.checkbox(&mut self.full_tree, t("Full tree", "完整树"));
+                    if self.rx.is_some() && self.scan_is_tree {
+                        crate::theme::badge(
+                            ui,
+                            crate::t_format!(
+                                "{} entries",
+                                "{} 个条目",
+                                self.progress.load(Ordering::Relaxed)
+                            ),
+                            ACCENT,
+                        );
+                        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                    }
+                    ui.label(RichText::new(t("Workers", "线程")).color(MUTED));
+                    ui.add(egui::DragValue::new(&mut self.threads).range(1..=32));
+                    ui.label(RichText::new(t("Filter", "筛选")).color(MUTED));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.filter)
+                            .desired_width(150.0)
+                            .hint_text(t("name contains", "名称包含")),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(&self.status).size(12.0).color(MUTED));
+                    });
+                });
+            });
+        egui::TopBottomPanel::bottom("bottom")
+            .resizable(true)
+            .frame(
+                egui::Frame::new()
+                    .fill(crate::theme::PANEL)
+                    .inner_margin(Margin::symmetric(14, 8)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(t("Export", "导出")).size(12.0).color(MUTED));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.export_path)
+                            .desired_width(360.0)
+                            .hint_text(t("CSV or JSONL output file", "CSV 或 JSONL 输出文件")),
+                    );
                     let enabled = self.tree.is_some() && self.export_rx.is_none();
                     if ui
-                        .add_enabled(enabled, egui::Button::new(t("Export CSV", "导出 CSV")))
+                        .add_enabled(enabled, egui::Button::new(t("CSV", "CSV")))
+                        .on_hover_text(t("Export the snapshot as CSV", "将快照导出为 CSV"))
                         .clicked()
                     {
                         self.begin_export(crate::tree::ExportFormat::Csv, ctx);
                     }
                     if ui
-                        .add_enabled(enabled, egui::Button::new(t("Export JSONL", "导出 JSONL")))
+                        .add_enabled(enabled, egui::Button::new(t("JSONL", "JSONL")))
+                        .on_hover_text(t(
+                            "Export the snapshot as JSON lines",
+                            "将快照导出为 JSON 行",
+                        ))
                         .clicked()
                     {
                         self.begin_export(crate::tree::ExportFormat::Jsonl, ctx);
                     }
                     if self.export_rx.is_some() {
-                        ui.label(t("Exporting...", "正在导出…"));
+                        ui.label(RichText::new(t("Exporting...", "正在导出…")).color(AMBER));
                     }
                 });
+                ui.add_space(2.0);
                 ui.horizontal(|ui| {
-                    ui.label(t("Plan file", "计划文件"));
-                    ui.add(egui::TextEdit::singleline(&mut self.plan_path).desired_width(420.0));
+                    ui.label(
+                        RichText::new(t("Plan file", "计划文件"))
+                            .size(12.0)
+                            .color(MUTED),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.plan_path)
+                            .desired_width(360.0)
+                            .hint_text(t("Cleanup plan path", "清理计划路径")),
+                    );
                     egui::ComboBox::from_id_salt("cleanup_mode")
+                        .width(130.0)
                         .selected_text(match self.cleanup_mode {
                             CleanupMode::Recycle => t("Recycle bin", "回收站"),
                             CleanupMode::Permanent => t("Permanent", "永久删除"),
@@ -866,23 +1003,38 @@ impl eframe::App for App {
                         });
                     if ui
                         .button(t("Create cleanup plan", "创建清理计划"))
+                        .on_hover_text(t(
+                            "Writes a plan for the marked entries; nothing is deleted yet",
+                            "为已标记条目写出计划；此时不会删除任何内容",
+                        ))
                         .clicked()
                     {
                         self.create_plan();
                     }
                 });
                 if self.plan_data.is_some() && self.tree.is_none() {
-                    ui.label(RichText::new(&self.plan_details).color(Color32::LIGHT_RED));
-                    ui.horizontal(|ui| {
-                        ui.label(t("Confirmation", "确认"));
-                        ui.text_edit_singleline(&mut self.confirm);
-                        if ui
-                            .button(t("Apply confirmed plan", "执行已确认的计划"))
-                            .clicked()
-                        {
-                            self.apply_plan(ctx);
-                        }
-                    });
+                    ui.add_space(4.0);
+                    egui::Frame::new()
+                        .fill(SURFACE)
+                        .stroke(Stroke::new(1.0, DANGER.gamma_multiply(0.7)))
+                        .corner_radius(CornerRadius::same(8))
+                        .inner_margin(Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(&self.plan_details).color(DANGER));
+                            ui.horizontal(|ui| {
+                                ui.label(t("Confirmation", "确认"));
+                                ui.text_edit_singleline(&mut self.confirm);
+                                let apply = egui::Button::new(
+                                    RichText::new(t("Apply confirmed plan", "执行已确认的计划"))
+                                        .strong()
+                                        .color(crate::theme::ACCENT_INK),
+                                )
+                                .fill(ACCENT);
+                                if ui.add(apply).clicked() {
+                                    self.apply_plan(ctx);
+                                }
+                            });
+                        });
                 }
             });
         self.show_help(ctx);
@@ -893,17 +1045,95 @@ impl eframe::App for App {
             self.show_search(ctx);
             return;
         }
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.label(t(
-                "Logical bytes | allocated bytes* | path (*hard links attributed once across scan)",
-                "逻辑字节 | 分配字节* | 路径（*硬链接在整次扫描中只计一次）",
-            ));
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(crate::theme::PANEL)
+                    .inner_margin(Margin::symmetric(14, 12)),
+            )
+            .show(ctx, |ui| {
+            if self.entries.is_empty() {
+                ui.add_space(36.0);
+                if self.rx.is_some() {
+                    ui.vertical_centered(|ui| {
+                        ui.spinner();
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(crate::t_format!(
+                                "Scanning... {} entries so far",
+                                "正在扫描… 已有 {} 个条目",
+                                self.progress.load(Ordering::Relaxed)
+                            ))
+                            .color(MUTED),
+                        );
+                    });
+                } else {
+                    ui.vertical_centered(|ui| {
+                        egui::Frame::new()
+                            .fill(SURFACE)
+                            .stroke(Stroke::new(1.0, STROKE))
+                            .corner_radius(CornerRadius::same(12))
+                            .inner_margin(Margin::same(26))
+                            .show(ui, |ui| {
+                                ui.set_max_width(460.0);
+                                ui.label(
+                                    RichText::new("filetree233")
+                                        .size(26.0)
+                                        .strong()
+                                        .color(ACCENT_STRONG),
+                                );
+                                ui.label(
+                                    RichText::new(t(
+                                        "See where the space went, then clean up with a plan you confirm yourself.",
+                                        "看清空间去向，再用由你亲自确认的计划清理。",
+                                    ))
+                                    .size(13.0)
+                                    .color(MUTED),
+                                );
+                                ui.add_space(10.0);
+                                ui.label(
+                                    RichText::new(t(
+                                        "Pick a volume or type a folder above, then press Scan.",
+                                        "在上方选择卷或输入文件夹，然后点击“扫描”。",
+                                    ))
+                                    .color(crate::theme::TEXT),
+                                );
+                                ui.label(
+                                    RichText::new(t(
+                                        "Hard links are counted once. Nothing is selected or deleted automatically.",
+                                        "硬链接只计一次。不会自动选中或删除任何内容。",
+                                    ))
+                                    .size(11.5)
+                                    .color(FAINT),
+                                );
+                            });
+                    });
+                }
+                return;
+            }
+            ui.label(
+                RichText::new(t(
+                    "Logical bytes | allocated bytes* | path (*hard links attributed once across scan)",
+                    "逻辑字节 | 分配字节* | 路径（*硬链接在整次扫描中只计一次）",
+                ))
+                .size(11.5)
+                .color(FAINT),
+            );
             let total: u64 = self
                 .entries
                 .iter()
                 .filter_map(|e| e["bytes"].as_u64())
                 .sum();
             let available = ui.available_width();
+            let palette = [
+                ACCENT,
+                Color32::from_rgb(95, 143, 212),
+                Color32::from_rgb(150, 121, 198),
+                Color32::from_rgb(214, 152, 82),
+                Color32::from_rgb(105, 172, 121),
+                Color32::from_rgb(198, 108, 132),
+            ];
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 for (i, entry) in self.entries.iter().take(30).enumerate() {
                     let n = entry["bytes"].as_u64().unwrap_or(0);
@@ -915,13 +1145,9 @@ impl eframe::App for App {
                         continue;
                     }
                     let (rect, response) =
-                        ui.allocate_exact_size(Vec2::new(width, 42.0), Sense::hover());
-                    let color = Color32::from_rgb(
-                        40 + (i as u8).wrapping_mul(41) % 120,
-                        90 + (i as u8).wrapping_mul(29) % 120,
-                        140,
-                    );
-                    ui.painter().rect_filled(rect, 1.0, color);
+                        ui.allocate_exact_size(Vec2::new(width, 46.0), Sense::hover());
+                    ui.painter()
+                        .rect_filled(rect.shrink(1.0), CornerRadius::same(4), palette[i % palette.len()]);
                     response.on_hover_text(crate::t_format!(
                         "{}: {} bytes",
                         "{}: {} 字节",
@@ -930,6 +1156,7 @@ impl eframe::App for App {
                     ));
                 }
             });
+            ui.add_space(8.0);
             ui.separator();
             let mut navigate = None;
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -962,22 +1189,31 @@ impl eframe::App for App {
                             }
                         }
                         if let Some(n) = entry["bytes"].as_u64() {
-                            ui.monospace(format!(
-                                "{n:>14} | {:>14}",
-                                entry["allocated_attributed_bytes"].as_u64().unwrap_or(0)
-                            ));
+                            ui.label(
+                                RichText::new(format!(
+                                    "{n:>14}  {:>14}",
+                                    entry["allocated_attributed_bytes"].as_u64().unwrap_or(0)
+                                ))
+                                .monospace()
+                                .size(12.0)
+                                .color(MUTED),
+                            );
                         } else {
-                            ui.colored_label(Color32::LIGHT_RED, t("ERROR", "错误"));
+                            ui.colored_label(DANGER, t("ERROR", "错误"));
                         }
+                        let shown = pretty_path(Path::new(path));
                         if is_dir && lossless {
-                            if ui.link(path).clicked() {
+                            if ui
+                                .link(RichText::new(shown).color(ACCENT_STRONG))
+                                .clicked()
+                            {
                                 navigate = Some(path.to_string());
                             }
                         } else {
-                            ui.label(path);
+                            ui.label(shown);
                             if !lossless {
                                 ui.colored_label(
-                                    Color32::YELLOW,
+                                    AMBER,
                                     t(
                                         "raw path; see exact code units in plan",
                                         "原始路径；精确码元见计划文件",
@@ -987,7 +1223,7 @@ impl eframe::App for App {
                         }
                         if entry["complete"] == false {
                             ui.colored_label(
-                                Color32::LIGHT_RED,
+                                DANGER,
                                 crate::t_format!(
                                     "Incomplete: {}",
                                     "不完整: {}",
@@ -996,7 +1232,7 @@ impl eframe::App for App {
                             );
                         }
                         if let Some(error) = entry["error"].as_str() {
-                            ui.colored_label(Color32::LIGHT_RED, error);
+                            ui.colored_label(DANGER, error);
                         }
                     });
                 }
@@ -1014,48 +1250,126 @@ impl App {
         let mut navigate = None;
         egui::SidePanel::left("tree-panel")
             .resizable(true)
-            .default_width(280.0)
+            .default_width(290.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(crate::theme::PANEL)
+                    .inner_margin(Margin::symmetric(10, 10)),
+            )
             .show(ctx, |ui| {
-                ui.heading(t("Directory tree", "目录树"));
-                if ui.button(t("Search entire tree", "搜索整棵树")).clicked() {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(t("Directory tree", "目录树"))
+                            .size(15.0)
+                            .strong(),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let (logical, _) = self.marked_sizes(&tree);
+                        if !self.marked.is_empty() {
+                            crate::theme::badge(
+                                ui,
+                                crate::t_format!(
+                                    "{} marked · {}",
+                                    "已标记 {} · {}",
+                                    self.marked.len(),
+                                    format_bytes(logical)
+                                ),
+                                DANGER,
+                            );
+                        }
+                        crate::theme::badge(
+                            ui,
+                            crate::t_format!("{} files", "{} 个文件", tree.nodes[0].files),
+                            ACCENT,
+                        );
+                    });
+                });
+                ui.add_space(4.0);
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 26.0],
+                        egui::Button::new(t("Search entire tree", "搜索整棵树")),
+                    )
+                    .clicked()
+                {
                     self.search_window_open = true;
                 }
 
                 ui.horizontal(|ui| {
+                    let half = (ui.available_width() - 8.0) / 2.0;
                     if self.duplicate_rx.is_none() {
-                        if ui.button(t("Find duplicates", "查找重复文件")).clicked() {
+                        if ui
+                            .add_sized(
+                                [half, 24.0],
+                                egui::Button::new(t("Find duplicates", "查找重复文件")),
+                            )
+                            .clicked()
+                        {
                             self.begin_duplicates(Arc::clone(&tree), ctx);
                         }
                         if self.duplicates.is_some()
-                            && ui.button(t("Show duplicates", "显示重复文件")).clicked()
+                            && ui
+                                .add_sized(
+                                    [half, 24.0],
+                                    egui::Button::new(t("Show duplicates", "显示重复文件")),
+                                )
+                                .clicked()
                         {
                             self.duplicate_window_open = true;
                         }
                     } else {
-                        ui.label(crate::t_format!(
-                            "Hashing: {}",
-                            "正在计算哈希: {}",
-                            self.duplicate_progress.load(Ordering::Relaxed)
-                        ));
-                        if ui.button(t("Cancel search", "取消搜索")).clicked() {
+                        crate::theme::badge(
+                            ui,
+                            crate::t_format!(
+                                "Hashing: {}",
+                                "哈希: {}",
+                                self.duplicate_progress.load(Ordering::Relaxed)
+                            ),
+                            AMBER,
+                        );
+                        if ui
+                            .add_sized(
+                                [80.0, 24.0],
+                                egui::Button::new(t("Cancel search", "取消搜索")),
+                            )
+                            .clicked()
+                        {
                             self.duplicate_cancelled.store(true, Ordering::Relaxed);
                         }
                     }
                 });
                 ui.horizontal(|ui| {
+                    let half = (ui.available_width() - 8.0) / 2.0;
                     if self.recommendation_rx.is_none() {
-                        if ui.button(t("Suggest cleanup", "清理建议")).clicked() {
+                        if ui
+                            .add_sized(
+                                [half, 24.0],
+                                egui::Button::new(t("Suggest cleanup", "清理建议")),
+                            )
+                            .clicked()
+                        {
                             self.begin_recommendations(Arc::clone(&tree), ctx);
                         }
                         if self.recommendations.is_some()
-                            && ui.button(t("Show suggestions", "显示建议")).clicked()
+                            && ui
+                                .add_sized(
+                                    [half, 24.0],
+                                    egui::Button::new(t("Show suggestions", "显示建议")),
+                                )
+                                .clicked()
                         {
                             self.recommendation_window_open = true;
                         }
                     } else {
-                        ui.label(t("Analyzing suggestions...", "正在分析清理建议…"));
+                        ui.label(
+                            RichText::new(t("Analyzing suggestions...", "正在分析清理建议…"))
+                                .color(AMBER)
+                                .size(12.0),
+                        );
                     }
                 });
+                ui.add_space(4.0);
+                ui.separator();
                 if self.visible_dirty {
                     self.visible_rows.clear();
                     let mut pending = vec![(0u32, 0usize)];
@@ -1071,348 +1385,490 @@ impl App {
                     self.visible_dirty = false;
                 }
                 let rows = std::mem::take(&mut self.visible_rows);
-                egui::ScrollArea::vertical().show_rows(ui, 22.0, rows.len(), |ui, range| {
-                    for index in range {
-                        let (id, depth) = rows[index];
-                        let node = &tree.nodes[id as usize];
-                        ui.horizontal(|ui| {
-                            ui.add_space((depth.min(20) * 14) as f32);
-                            if node.is_dir {
-                                let symbol = if self.expanded.contains(&id) {
-                                    "▾"
-                                } else {
-                                    "▸"
-                                };
-                                if ui.small_button(symbol).clicked() {
-                                    if !self.expanded.remove(&id) {
-                                        self.expanded.insert(id);
-                                    }
-                                    self.visible_dirty = true;
-                                }
-                            } else {
-                                ui.label("  ");
+                egui::ScrollArea::vertical().id_salt("tree-rows").show_rows(
+                    ui,
+                    24.0,
+                    rows.len(),
+                    |ui, range| {
+                        for index in range {
+                            let (id, depth) = rows[index];
+                            let node = &tree.nodes[id as usize];
+                            let row = Rect::from_min_size(
+                                ui.cursor().min,
+                                Vec2::new(ui.available_width(), 24.0),
+                            );
+                            let response = ui.allocate_rect(row, Sense::click());
+                            let selected = id == self.tree_current;
+                            let hovered = response.hovered();
+                            let painter =
+                                ui.painter().with_clip_rect(ui.clip_rect().intersect(row));
+                            if selected {
+                                painter.rect_filled(
+                                    row.shrink2(Vec2::new(1.0, 1.0)),
+                                    CornerRadius::same(5),
+                                    ACCENT.gamma_multiply(0.16),
+                                );
+                            } else if hovered {
+                                painter.rect_filled(
+                                    row.shrink2(Vec2::new(1.0, 1.0)),
+                                    CornerRadius::same(5),
+                                    SURFACE,
+                                );
                             }
+                            let mut x = row.min.x + 8.0 + (depth.min(20) as f32) * 14.0;
+                            let mut toggle = false;
+                            if node.is_dir {
+                                let tri = Rect::from_center_size(
+                                    pos2(x + 5.0, row.center().y),
+                                    Vec2::splat(14.0),
+                                );
+                                let center = tri.center();
+                                let (points, color) = if self.expanded.contains(&id) {
+                                    (
+                                        vec![
+                                            pos2(center.x - 4.0, center.y - 2.5),
+                                            pos2(center.x + 4.0, center.y - 2.5),
+                                            pos2(center.x, center.y + 2.5),
+                                        ],
+                                        if hovered { crate::theme::TEXT } else { MUTED },
+                                    )
+                                } else {
+                                    (
+                                        vec![
+                                            pos2(center.x - 2.5, center.y - 4.0),
+                                            pos2(center.x - 2.5, center.y + 4.0),
+                                            pos2(center.x + 2.5, center.y),
+                                        ],
+                                        if hovered { crate::theme::TEXT } else { MUTED },
+                                    )
+                                };
+                                painter.add(egui::Shape::convex_polygon(
+                                    points,
+                                    color,
+                                    Stroke::NONE,
+                                ));
+                                toggle = response.clicked()
+                                    && response
+                                        .interact_pointer_pos()
+                                        .is_some_and(|p| tri.expand(2.0).contains(p));
+                            }
+                            x += 16.0;
+                            let icon = Rect::from_center_size(
+                                pos2(x + 6.0, row.center().y),
+                                Vec2::new(12.0, 11.0),
+                            );
+                            if node.is_dir {
+                                paint_folder(
+                                    &painter,
+                                    icon,
+                                    if selected {
+                                        ACCENT_STRONG
+                                    } else {
+                                        ACCENT.gamma_multiply(0.85)
+                                    },
+                                );
+                            } else {
+                                paint_file(&painter, icon, FAINT);
+                            }
+                            x += 18.0;
                             let label = if id == 0 {
-                                tree.root.display().to_string()
+                                pretty_path(&tree.root)
                             } else {
                                 node.name.to_string_lossy().into_owned()
                             };
-                            if ui
-                                .selectable_label(id == self.tree_current, label)
-                                .clicked()
-                                && node.is_dir
-                            {
-                                navigate = Some(id);
-                            }
+                            painter.text(
+                                pos2(x, row.center().y),
+                                egui::Align2::LEFT_CENTER,
+                                &label,
+                                egui::FontId::proportional(13.0),
+                                if selected {
+                                    crate::theme::TEXT
+                                } else if node.is_dir {
+                                    crate::theme::TEXT
+                                } else {
+                                    MUTED
+                                },
+                            );
                             if !node.complete {
-                                ui.colored_label(Color32::LIGHT_RED, "!").on_hover_text(
-                                    node_error(
-                                        node,
-                                        t("Contains incomplete entries", "包含不完整条目"),
-                                    ),
+                                painter.circle_filled(
+                                    pos2(row.max.x - 10.0, row.center().y),
+                                    2.5,
+                                    DANGER,
                                 );
                             }
-                        });
-                    }
-                });
+                            if toggle {
+                                if !self.expanded.remove(&id) {
+                                    self.expanded.insert(id);
+                                }
+                                self.visible_dirty = true;
+                            } else if response.clicked() && node.is_dir {
+                                navigate = Some(id);
+                            }
+                            let response = response.on_hover_text(pretty_path(&tree.path(id)));
+                            if !node.complete {
+                                response.on_hover_text(node_error(
+                                    node,
+                                    t("Contains incomplete entries", "包含不完整条目"),
+                                ));
+                            }
+                        }
+                    },
+                );
                 self.visible_rows = rows;
             });
         self.handle_keys(ctx, &tree);
         self.show_info_panel(ctx, &tree);
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.treemap_toolbar(ui, &tree, ctx);
-            let current = self.tree_current;
-            let list_height = 220.0_f32;
-            let size = Vec2::new(
-                ui.available_width(),
-                (ui.available_height() - list_height).max(200.0),
-            );
-            let (area, _) = ui.allocate_exact_size(size, Sense::hover());
-            let state = (current, area, self.metric, self.hide_dot, self.depth);
-            if self.treemap_state != Some(state) {
-                let metric = self.metric;
-                let hide_dot = self.hide_dot;
-                self.treemap_tiles = crate::treemap::layout(
-                    &tree,
-                    current,
-                    area,
-                    2048,
-                    self.depth,
-                    &move |node: &crate::tree::Node| tile_weight(node, metric, hide_dot),
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(crate::theme::PANEL)
+                    .inner_margin(Margin::symmetric(12, 8)),
+            )
+            .show(ctx, |ui| {
+                self.treemap_toolbar(ui, &tree, ctx);
+                let current = self.tree_current;
+                let list_height = 220.0_f32;
+                let size = Vec2::new(
+                    ui.available_width(),
+                    (ui.available_height() - list_height).max(200.0),
                 );
-                self.treemap_state = Some(state);
-            }
-            let mut tiles = std::mem::take(&mut self.treemap_tiles);
-            let mut open_target = None;
-            let mut mark_target = None;
-            let mut reveal_target = None;
-            let mut hovered = None;
-            for tile in tiles.iter_mut() {
-                let id = tile.id;
-                let rect = tile.rect;
-                let node = &tree.nodes[id as usize];
-                let marked = self.marked.contains(&id);
-                let covered = !tile.remainder && self.marked_ancestor(&tree, id).is_some();
-                let reclaim = !tile.remainder && self.reclaim_dirs.contains(&id);
-                let suggestion_rule = self.hints.get(&id).copied();
-                let base = if tile.remainder {
-                    Color32::from_rgb(66, 66, 74)
-                } else {
-                    crate::classify::shade(
-                        crate::classify::classify(&node.name, node.is_dir).color(),
-                        tile.depth,
-                    )
-                };
-                let fill = if marked {
-                    DANGER
-                } else if covered {
-                    DANGER.linear_multiply(0.7)
-                } else {
-                    base
-                };
-                ui.painter().rect_filled(rect.shrink(0.5), 1.0, fill);
-                if reclaim && !marked && !covered {
-                    paint_hatch(ui, rect);
+                let (area, _) = ui.allocate_exact_size(size, Sense::hover());
+                ui.painter()
+                    .rect_filled(area, CornerRadius::same(8), crate::theme::BG);
+                let state = (current, area, self.metric, self.hide_dot, self.depth);
+                if self.treemap_state != Some(state) {
+                    let metric = self.metric;
+                    let hide_dot = self.hide_dot;
+                    self.treemap_tiles = crate::treemap::layout(
+                        &tree,
+                        current,
+                        area,
+                        2048,
+                        self.depth,
+                        &move |node: &crate::tree::Node| tile_weight(node, metric, hide_dot),
+                    );
+                    self.treemap_state = Some(state);
                 }
-                let label = if tile.remainder {
-                    t("other entries", "其他条目").to_owned()
-                } else if id == 0 {
-                    tree.root.to_string_lossy().into_owned()
-                } else {
-                    node.name.to_string_lossy().into_owned()
-                };
-                if rect.width() > 44.0 && rect.height() > 15.0 {
-                    let room_for_size = rect.width() > 108.0 && rect.height() > 30.0;
-                    let amount = if self.metric == Metric::Files {
-                        crate::t_format!("{} files", "{} 个文件", tile.weight)
+                let mut tiles = std::mem::take(&mut self.treemap_tiles);
+                let mut open_target = None;
+                let mut mark_target = None;
+                let mut reveal_target = None;
+                let mut hovered = None;
+                for tile in tiles.iter_mut() {
+                    let id = tile.id;
+                    let rect = tile.rect;
+                    let node = &tree.nodes[id as usize];
+                    let marked = self.marked.contains(&id);
+                    let covered = !tile.remainder && self.marked_ancestor(&tree, id).is_some();
+                    let reclaim = !tile.remainder && self.reclaim_dirs.contains(&id);
+                    let suggestion_rule = self.hints.get(&id).copied();
+                    let base = if tile.remainder {
+                        Color32::from_rgb(62, 72, 84)
                     } else {
-                        format_bytes(tile.weight)
+                        crate::classify::shade(
+                            crate::classify::classify(&node.name, node.is_dir).color(),
+                            tile.depth,
+                        )
                     };
-                    let text = if room_for_size {
-                        format!("{label}\n{amount}")
+                    let mut fill = if marked {
+                        DANGER
+                    } else if covered {
+                        DANGER.linear_multiply(0.7)
                     } else {
-                        label.clone()
+                        base
                     };
-                    ui.painter().with_clip_rect(rect).text(
-                        rect.min + Vec2::new(4.0, 3.0),
-                        egui::Align2::LEFT_TOP,
-                        text,
-                        egui::FontId::proportional(if tile.depth == 0 { 13.0 } else { 11.0 }),
-                        Color32::from_gray(238),
-                    );
-                }
-                if self.focus == Some(id) {
-                    ui.painter().rect_stroke(
-                        rect.shrink(1.5),
-                        1.0,
-                        egui::Stroke::new(2.0_f32, AMBER),
-                        egui::StrokeKind::Inside,
-                    );
-                } else if marked {
-                    ui.painter().rect_stroke(
-                        rect.shrink(1.5),
-                        1.0,
-                        egui::Stroke::new(1.5_f32, Color32::WHITE),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-                let response = ui
-                    .interact(rect, ui.id().with(("tile", id, tile.depth)), Sense::click())
-                    .on_hover_ui(|ui| {
-                        if tile.remainder {
-                            ui.label(crate::t_format!(
-                                "Entries too small to draw\n{}",
-                                "条目太小无法绘制\n{}",
-                                format_bytes(tile.weight)
-                            ));
-                            return;
-                        }
-                        ui.label(tree.path(id).display().to_string());
-                        ui.monospace(crate::t_format!(
-                            "{} logical\n{} on disk\n{} files",
-                            "{} 逻辑\n{} 磁盘\n{} 文件",
-                            format_bytes(node.logical),
-                            format_bytes(node.allocated),
-                            node.files
-                        ));
-                        let root_total = tree.nodes[0].logical.max(1);
-                        ui.label(crate::t_format!(
-                            "{:.1}% of the scan by size",
-                            "占扫描总量的 {:.1}%（按大小）",
-                            node.logical as f64 * 100.0 / root_total as f64
-                        ));
-                        if let Some(rule) = suggestion_rule {
-                            ui.colored_label(
-                                HATCH,
-                                crate::t_format!("cleanup hint: {rule}", "清理提示: {rule}"),
-                            );
-                        }
-                        if marked {
-                            ui.colored_label(DANGER, t("marked for cleanup", "已标记清理"));
-                        } else if covered {
-                            ui.colored_label(
-                                DANGER,
-                                t("inside a marked directory", "位于已标记的目录内"),
-                            );
-                        }
-                        if !node.complete {
-                            ui.colored_label(
-                                Color32::LIGHT_RED,
-                                node_error(node, t("incomplete", "不完整")),
-                            );
-                        }
-                        ui.label(t(
-                            "Click a directory to open it, Space to mark, / for keys.",
-                            "单击目录进入，空格标记，/ 查看快捷键。",
-                        ));
-                    });
-                if response.hovered() {
-                    hovered = Some(id);
-                }
-                let held = ctx.input(|i| i.modifiers.command || i.modifiers.ctrl);
-                if response.clicked() && !tile.remainder {
-                    self.focus = Some(id);
-                    if held || !node.is_dir {
-                        mark_target = Some(id);
-                    } else if id != current {
-                        open_target = Some(id);
+                    let tile_hovered = ctx.pointer_hover_pos().is_some_and(|p| rect.contains(p));
+                    if tile_hovered && !marked && !covered {
+                        fill = fill.linear_multiply(1.16);
                     }
-                }
-                if response.secondary_clicked() && !tile.remainder {
-                    self.focus = Some(id);
-                }
-                if !tile.remainder {
-                    response.context_menu(|ui| {
-                        if ui
-                            .button(if marked {
-                                t("Unmark", "取消标记")
-                            } else {
-                                t("Mark for cleanup", "标记为待清理")
-                            })
-                            .clicked()
-                        {
-                            mark_target = Some(id);
-                            ui.close();
-                        }
-                        if node.is_dir && ui.button(t("Open here", "在此打开")).clicked() {
-                            open_target = Some(id);
-                            ui.close();
-                        }
-                        if ui
-                            .button(t("Show in file manager", "在文件管理器中显示"))
-                            .clicked()
-                        {
-                            reveal_target = Some(tree.path(id));
-                            ui.close();
-                        }
-                    });
-                }
-            }
-            self.treemap_tiles = tiles;
-            self.hover_tile = hovered;
-            if let Some(id) = mark_target {
-                self.toggle_mark(&tree, id);
-            }
-            if let Some(path) = reveal_target
-                && let Err(error) = reveal(&path)
-            {
-                self.status = error;
-            }
-            if let Some(id) = open_target {
-                navigate = Some(id);
-            }
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label(crate::t_format!(
-                    "{} entries here | logical | on disk | files | name",
-                    "{} 项 | 逻辑 | 磁盘 | 文件 | 名称",
-                    tree.child_ids(current).count()
-                ));
-                if self.rx.is_none()
-                    && ui
-                        .small_button(if self.marked.contains(&current) {
-                            t("Unmark this folder", "取消标记此目录")
+                    let body = rect.shrink(1.2);
+                    ui.painter().rect_filled(body, CornerRadius::same(3), fill);
+                    if tile_hovered && !marked && !covered {
+                        ui.painter().rect_stroke(
+                            body,
+                            CornerRadius::same(3),
+                            Stroke::new(1.2, ACCENT_STRONG.gamma_multiply(0.8)),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    if reclaim && !marked && !covered {
+                        paint_hatch(ui, body);
+                    }
+                    let label = if tile.remainder {
+                        t("other entries", "其他条目").to_owned()
+                    } else if id == 0 {
+                        pretty_path(&tree.root)
+                    } else {
+                        node.name.to_string_lossy().into_owned()
+                    };
+                    if rect.width() > 44.0 && rect.height() > 15.0 {
+                        let room_for_size = rect.width() > 108.0 && rect.height() > 30.0;
+                        let amount = if self.metric == Metric::Files {
+                            crate::t_format!("{} files", "{} 个文件", tile.weight)
                         } else {
-                            t("Mark this folder", "标记此目录")
-                        })
-                        .clicked()
-                {
-                    self.toggle_mark(&tree, current);
-                }
-            });
-            let key = (current, self.filter.clone(), self.metric, self.hide_dot);
-            if self.list_key.as_ref() != Some(&key) {
-                let filter = self.filter.to_lowercase();
-                let mut rows: Vec<u32> = tree
-                    .child_ids(current)
-                    .filter(|id| {
-                        let node = &tree.nodes[*id as usize];
-                        tile_weight(node, self.metric, self.hide_dot) > 0
-                            && node.name.to_string_lossy().to_lowercase().contains(&filter)
-                    })
-                    .collect();
-                rows.sort_by(|a, b| {
-                    let (a, b) = (&tree.nodes[*a as usize], &tree.nodes[*b as usize]);
-                    tile_weight(b, key.2, key.3)
-                        .cmp(&tile_weight(a, key.2, key.3))
-                        .then_with(|| a.name.cmp(&b.name))
-                });
-                self.list_rows = rows;
-                self.list_key = Some(key);
-            }
-            let children = std::mem::take(&mut self.list_rows);
-            egui::ScrollArea::vertical()
-                .id_salt("child-list")
-                .show_rows(ui, 23.0, children.len(), |ui, range| {
-                    for row in range {
-                        let id = children[row];
-                        let node = &tree.nodes[id as usize];
-                        let marked = self.marked.contains(&id);
-                        let covered = self.marked_ancestor(&tree, id).is_some();
-                        ui.horizontal(|ui| {
-                            let mut checked = marked;
-                            let checkbox =
-                                ui.add_enabled(!covered, egui::Checkbox::new(&mut checked, ""));
-                            if checkbox.changed() {
-                                self.toggle_mark(&tree, id);
+                            format_bytes(tile.weight)
+                        };
+                        let text = if room_for_size {
+                            format!("{label}\n{amount}")
+                        } else {
+                            label.clone()
+                        };
+                        let text_painter = ui.painter().with_clip_rect(body);
+                        let font =
+                            egui::FontId::proportional(if tile.depth == 0 { 13.0 } else { 11.0 });
+                        let at = body.min + Vec2::new(5.0, 4.0);
+                        text_painter.text(
+                            at + Vec2::new(0.0, 1.0),
+                            egui::Align2::LEFT_TOP,
+                            &text,
+                            font.clone(),
+                            Color32::from_black_alpha(130),
+                        );
+                        text_painter.text(
+                            at,
+                            egui::Align2::LEFT_TOP,
+                            text,
+                            font,
+                            Color32::from_gray(242),
+                        );
+                    }
+                    if self.focus == Some(id) {
+                        ui.painter().rect_stroke(
+                            body,
+                            CornerRadius::same(3),
+                            egui::Stroke::new(2.0_f32, AMBER),
+                            egui::StrokeKind::Inside,
+                        );
+                    } else if marked {
+                        ui.painter().rect_stroke(
+                            body,
+                            CornerRadius::same(3),
+                            egui::Stroke::new(1.5_f32, Color32::WHITE),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    let response = ui
+                        .interact(rect, ui.id().with(("tile", id, tile.depth)), Sense::click())
+                        .on_hover_ui(|ui| {
+                            if tile.remainder {
+                                ui.label(crate::t_format!(
+                                    "Entries too small to draw\n{}",
+                                    "条目太小无法绘制\n{}",
+                                    format_bytes(tile.weight)
+                                ));
+                                return;
                             }
-                            ui.monospace(format!(
-                                "{:>9} | {:>9} | {:>7}",
+                            ui.label(pretty_path(&tree.path(id)));
+                            ui.monospace(crate::t_format!(
+                                "{} logical\n{} on disk\n{} files",
+                                "{} 逻辑\n{} 磁盘\n{} 文件",
                                 format_bytes(node.logical),
                                 format_bytes(node.allocated),
                                 node.files
                             ));
-                            if node.is_dir {
-                                if ui.link(node.name.to_string_lossy()).clicked() {
-                                    navigate = Some(id);
-                                }
-                            } else {
-                                ui.label(node.name.to_string_lossy());
+                            let root_total = tree.nodes[0].logical.max(1);
+                            ui.label(crate::t_format!(
+                                "{:.1}% of the scan by size",
+                                "占扫描总量的 {:.1}%（按大小）",
+                                node.logical as f64 * 100.0 / root_total as f64
+                            ));
+                            if let Some(rule) = suggestion_rule {
+                                ui.colored_label(
+                                    HATCH,
+                                    crate::t_format!("cleanup hint: {rule}", "清理提示: {rule}"),
+                                );
                             }
                             if marked {
-                                ui.colored_label(DANGER, t("marked", "已标记"));
+                                ui.colored_label(DANGER, t("marked for cleanup", "已标记清理"));
                             } else if covered {
-                                ui.colored_label(DANGER, t("in marked folder", "在已标记目录内"))
+                                ui.colored_label(
+                                    DANGER,
+                                    t("inside a marked directory", "位于已标记的目录内"),
+                                );
+                            }
+                            if !node.complete {
+                                ui.colored_label(
+                                    DANGER,
+                                    node_error(node, t("incomplete", "不完整")),
+                                );
+                            }
+                            ui.label(t(
+                                "Click a directory to open it, Space to mark, / for keys.",
+                                "单击目录进入，空格标记，/ 查看快捷键。",
+                            ));
+                        });
+                    if response.hovered() {
+                        hovered = Some(id);
+                    }
+                    let held = ctx.input(|i| i.modifiers.command || i.modifiers.ctrl);
+                    if response.clicked() && !tile.remainder {
+                        self.focus = Some(id);
+                        if held || !node.is_dir {
+                            mark_target = Some(id);
+                        } else if id != current {
+                            open_target = Some(id);
+                        }
+                    }
+                    if response.secondary_clicked() && !tile.remainder {
+                        self.focus = Some(id);
+                    }
+                    if !tile.remainder {
+                        response.context_menu(|ui| {
+                            if ui
+                                .button(if marked {
+                                    t("Unmark", "取消标记")
+                                } else {
+                                    t("Mark for cleanup", "标记为待清理")
+                                })
+                                .clicked()
+                            {
+                                mark_target = Some(id);
+                                ui.close();
+                            }
+                            if node.is_dir && ui.button(t("Open here", "在此打开")).clicked() {
+                                open_target = Some(id);
+                                ui.close();
+                            }
+                            if ui
+                                .button(t("Show in file manager", "在文件管理器中显示"))
+                                .clicked()
+                            {
+                                reveal_target = Some(tree.path(id));
+                                ui.close();
+                            }
+                        });
+                    }
+                }
+                self.treemap_tiles = tiles;
+                self.hover_tile = hovered;
+                if let Some(id) = mark_target {
+                    self.toggle_mark(&tree, id);
+                }
+                if let Some(path) = reveal_target
+                    && let Err(error) = reveal(&path)
+                {
+                    self.status = error;
+                }
+                if let Some(id) = open_target {
+                    navigate = Some(id);
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(crate::t_format!(
+                            "{} entries here",
+                            "此处 {} 项",
+                            tree.child_ids(current).count()
+                        ))
+                        .size(12.0)
+                        .color(MUTED),
+                    );
+                    ui.label(
+                        RichText::new(t("logical · on disk · files", "逻辑 · 磁盘 · 文件"))
+                            .size(11.0)
+                            .color(FAINT),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if self.rx.is_none()
+                            && ui
+                                .small_button(if self.marked.contains(&current) {
+                                    t("Unmark this folder", "取消标记此目录")
+                                } else {
+                                    t("Mark this folder", "标记此目录")
+                                })
+                                .clicked()
+                        {
+                            self.toggle_mark(&tree, current);
+                        }
+                    });
+                });
+                let key = (current, self.filter.clone(), self.metric, self.hide_dot);
+                if self.list_key.as_ref() != Some(&key) {
+                    let filter = self.filter.to_lowercase();
+                    let mut rows: Vec<u32> = tree
+                        .child_ids(current)
+                        .filter(|id| {
+                            let node = &tree.nodes[*id as usize];
+                            tile_weight(node, self.metric, self.hide_dot) > 0
+                                && node.name.to_string_lossy().to_lowercase().contains(&filter)
+                        })
+                        .collect();
+                    rows.sort_by(|a, b| {
+                        let (a, b) = (&tree.nodes[*a as usize], &tree.nodes[*b as usize]);
+                        tile_weight(b, key.2, key.3)
+                            .cmp(&tile_weight(a, key.2, key.3))
+                            .then_with(|| a.name.cmp(&b.name))
+                    });
+                    self.list_rows = rows;
+                    self.list_key = Some(key);
+                }
+                let children = std::mem::take(&mut self.list_rows);
+                egui::ScrollArea::vertical()
+                    .id_salt("child-list")
+                    .show_rows(ui, 23.0, children.len(), |ui, range| {
+                        for row in range {
+                            let id = children[row];
+                            let node = &tree.nodes[id as usize];
+                            let marked = self.marked.contains(&id);
+                            let covered = self.marked_ancestor(&tree, id).is_some();
+                            ui.horizontal(|ui| {
+                                let mut checked = marked;
+                                let checkbox =
+                                    ui.add_enabled(!covered, egui::Checkbox::new(&mut checked, ""));
+                                if checkbox.changed() {
+                                    self.toggle_mark(&tree, id);
+                                }
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{:>9}  {:>9}  {:>7}",
+                                        format_bytes(node.logical),
+                                        format_bytes(node.allocated),
+                                        node.files
+                                    ))
+                                    .monospace()
+                                    .size(12.0)
+                                    .color(MUTED),
+                                );
+                                if node.is_dir {
+                                    if ui
+                                        .link(
+                                            RichText::new(node.name.to_string_lossy())
+                                                .color(ACCENT_STRONG),
+                                        )
+                                        .clicked()
+                                    {
+                                        navigate = Some(id);
+                                    }
+                                } else {
+                                    ui.label(node.name.to_string_lossy());
+                                }
+                                if marked {
+                                    ui.colored_label(DANGER, t("marked", "已标记"));
+                                } else if covered {
+                                    ui.colored_label(
+                                        DANGER,
+                                        t("in marked folder", "在已标记目录内"),
+                                    )
                                     .on_hover_text(t(
                                         "A parent directory is already marked",
                                         "上级目录已被标记",
                                     ));
-                            }
-                            if self.reclaim_dirs.contains(&id) {
-                                ui.colored_label(AMBER, t("reclaimable", "可能回收"));
-                            }
-                            if !node.complete {
-                                ui.colored_label(Color32::LIGHT_RED, t("incomplete", "不完整"))
-                                    .on_hover_text(node_error(
-                                        node,
-                                        t("Contains incomplete entries", "包含不完整条目"),
-                                    ));
-                            }
-                        });
-                    }
-                });
-            self.list_rows = children;
-        });
+                                }
+                                if self.reclaim_dirs.contains(&id) {
+                                    ui.colored_label(AMBER, t("reclaimable", "可能回收"));
+                                }
+                                if !node.complete {
+                                    ui.colored_label(DANGER, t("incomplete", "不完整"))
+                                        .on_hover_text(node_error(
+                                            node,
+                                            t("Contains incomplete entries", "包含不完整条目"),
+                                        ));
+                                }
+                            });
+                        }
+                    });
+                self.list_rows = children;
+            });
         if let Some(id) = navigate {
             self.open_node(&tree, id);
         }
@@ -1557,8 +2013,7 @@ impl App {
                 self.open_node(tree, parent);
             }
         } else if let Some(parent) = Path::new(&self.path).parent() {
-            let text = parent.display().to_string();
-            self.path = text;
+            self.path = pretty_path(parent);
             self.begin_scan(ctx);
         }
     }
@@ -1582,8 +2037,8 @@ impl App {
             self.status = crate::t_format!(
                 "{} is already inside the marked {}",
                 "{} 已在已标记的 {} 内",
-                tree.path(id).display(),
-                tree.path(covered).display()
+                pretty_path(&tree.path(id)),
+                pretty_path(&tree.path(covered))
             );
             return;
         }
@@ -1646,8 +2101,8 @@ impl App {
         self.forget_plan();
     }
     fn rescan(&mut self, ctx: &egui::Context) {
-        if let Some(text) = self.scan_root.to_str() {
-            self.path = text.to_owned();
+        if self.scan_root.to_str().is_some() {
+            self.path = pretty_path(&self.scan_root);
         }
         self.begin_scan(ctx);
     }
@@ -1729,54 +2184,90 @@ impl App {
         tree: &crate::tree::Snapshot,
         ctx: &egui::Context,
     ) {
-        ui.horizontal_wrapped(|ui| {
-            let mut chain = vec![self.tree_current];
-            chain.extend(ancestor_ids(tree, self.tree_current).into_iter().rev());
-            for (index, id) in chain.iter().copied().enumerate() {
-                if index > 0 {
-                    ui.label("/");
-                }
-                let label = if id == 0 {
-                    tree.root.to_string_lossy().into_owned()
-                } else {
-                    tree.nodes[id as usize].name.to_string_lossy().into_owned()
-                };
-                if ui
-                    .selectable_label(id == self.tree_current, label)
-                    .clicked()
-                {
-                    self.open_node(tree, id);
-                }
-            }
-        });
         ui.horizontal(|ui| {
-            if ui
-                .button(crate::t_format!(
-                    "Area: {}",
-                    "面积: {}",
-                    self.metric.label()
-                ))
-                .clicked()
-            {
-                self.metric = self.metric.next();
-            }
-            ui.add(
-                egui::DragValue::new(&mut self.depth)
-                    .range(1..=4)
-                    .suffix(t(" levels", " 层")),
-            );
+            egui::Frame::new()
+                .fill(BG)
+                .corner_radius(CornerRadius::same(6))
+                .inner_margin(Margin::symmetric(8, 3))
+                .show(ui, |ui| {
+                    egui::ScrollArea::horizontal()
+                        .id_salt("breadcrumb")
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let mut chain = vec![self.tree_current];
+                                chain.extend(
+                                    ancestor_ids(tree, self.tree_current).into_iter().rev(),
+                                );
+                                for (index, id) in chain.iter().copied().enumerate() {
+                                    if index > 0 {
+                                        ui.label(RichText::new("›").color(FAINT));
+                                    }
+                                    let label = if id == 0 {
+                                        pretty_path(&tree.root)
+                                    } else {
+                                        tree.nodes[id as usize].name.to_string_lossy().into_owned()
+                                    };
+                                    let text = if id == self.tree_current {
+                                        RichText::new(label).strong().color(ACCENT_STRONG)
+                                    } else {
+                                        RichText::new(label).color(MUTED)
+                                    };
+                                    if ui.selectable_label(id == self.tree_current, text).clicked()
+                                    {
+                                        self.open_node(tree, id);
+                                    }
+                                }
+                            });
+                        });
+                });
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            egui::Frame::new()
+                .fill(BG)
+                .corner_radius(CornerRadius::same(6))
+                .inner_margin(Margin::same(2))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for metric in [Metric::Logical, Metric::Allocated, Metric::Files] {
+                            let selected = self.metric == metric;
+                            let button = egui::Button::new(
+                                RichText::new(metric.label()).size(12.0).color(if selected {
+                                    crate::theme::ACCENT_INK
+                                } else {
+                                    MUTED
+                                }),
+                            )
+                            .fill(if selected {
+                                ACCENT
+                            } else {
+                                Color32::TRANSPARENT
+                            })
+                            .corner_radius(CornerRadius::same(4))
+                            .min_size(Vec2::new(0.0, 22.0));
+                            if ui.add(button).clicked() {
+                                self.metric = metric;
+                            }
+                        }
+                    });
+                });
+            ui.label(RichText::new(t("Depth", "层数")).size(12.0).color(MUTED));
+            ui.add(egui::DragValue::new(&mut self.depth).range(1..=6));
             ui.checkbox(&mut self.hide_dot, t("Hide dotfiles", "隐藏点号文件"));
             if !self.marked.is_empty() {
                 let (logical, _) = self.marked_sizes(tree);
-                if ui
-                    .button(crate::t_format!(
+                let review = egui::Button::new(
+                    RichText::new(crate::t_format!(
                         "Review {} ({})",
                         "核对 {}（{}）",
                         self.marked.len(),
                         format_bytes(logical)
                     ))
-                    .clicked()
-                {
+                    .strong()
+                    .color(crate::theme::ACCENT_INK),
+                )
+                .fill(ACCENT);
+                if ui.add(review).clicked() {
                     self.review_open = true;
                 }
                 if ui.small_button(t("Clear marks", "清除标记")).clicked() {
@@ -1784,61 +2275,57 @@ impl App {
                     self.forget_plan();
                 }
             }
-            if ui
-                .add_enabled(
-                    self.rx.is_none(),
-                    egui::Button::new(t("Rescan", "重新扫描")),
-                )
-                .clicked()
-            {
-                self.rescan(ctx);
-            }
-            if ui.button(t("Keys", "快捷键")).clicked() {
-                self.help_open = true;
-            }
-            let next_language = match crate::i18n::current() {
-                crate::i18n::Lang::Zh => crate::i18n::Lang::En,
-                crate::i18n::Lang::En => crate::i18n::Lang::Zh,
-            };
-            let next_label = match next_language {
-                crate::i18n::Lang::Zh => "中文",
-                crate::i18n::Lang::En => "English",
-            };
-            if ui
-                .button(next_label)
-                .on_hover_text(t("Switch interface language", "切换界面语言"))
-                .clicked()
-            {
-                crate::i18n::set(next_language);
-            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add_enabled(
+                        self.rx.is_none(),
+                        egui::Button::new(t("Rescan", "重新扫描")),
+                    )
+                    .clicked()
+                {
+                    self.rescan(ctx);
+                }
+            });
         });
-        ui.separator();
+        ui.add_space(2.0);
     }
     fn show_info_panel(&mut self, ctx: &egui::Context, tree: &crate::tree::Snapshot) {
         egui::SidePanel::right("details")
             .resizable(true)
-            .default_width(300.0)
-            .min_width(220.0)
+            .default_width(310.0)
+            .min_width(240.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(crate::theme::PANEL)
+                    .inner_margin(Margin::symmetric(10, 10)),
+            )
             .show(ctx, |ui| {
-                ui.heading(t("Volume", "卷"));
-                self.disk_panel(ui, tree);
-                ui.separator();
-                ui.heading(t("Entry", "条目"));
-                match self.hover_tile.or(self.focus) {
-                    Some(id) => self.node_panel(ui, tree, id),
-                    None => {
-                        ui.label(t(
-                            "Hover a tile or press an arrow key to inspect an entry.",
-                            "悬停方块或按方向键查看条目。",
-                        ));
-                    }
-                }
-                ui.separator();
-                ui.heading(t("Marks", "标记清单"));
-                self.marks_panel(ui, tree);
-                ui.separator();
-                ui.heading(t("Worth a look", "值得一看"));
-                self.suggestion_panel(ui, tree);
+                egui::ScrollArea::vertical()
+                    .id_salt("inspector")
+                    .show(ui, |ui| {
+                        section(ui, t("Volume", "卷"), |ui| self.disk_panel(ui, tree));
+                        section(ui, t("Entry", "条目"), |ui| {
+                            match self.hover_tile.or(self.focus) {
+                                Some(id) => self.node_panel(ui, tree, id),
+                                None => {
+                                    ui.label(
+                                    RichText::new(t(
+                                        "Hover a tile or press an arrow key to inspect an entry.",
+                                        "悬停方块或按方向键查看条目。",
+                                    ))
+                                    .size(12.0)
+                                    .color(MUTED),
+                                );
+                                }
+                            }
+                        });
+                        section(ui, t("Marks", "标记清单"), |ui| {
+                            self.marks_panel(ui, tree)
+                        });
+                        section(ui, t("Worth a look", "值得一看"), |ui| {
+                            self.suggestion_panel(ui, tree)
+                        });
+                    });
             });
     }
     fn disk_panel(&mut self, ui: &mut egui::Ui, tree: &crate::tree::Snapshot) {
@@ -1846,32 +2333,64 @@ impl App {
             Some(space) if space.total > 0 => {
                 let used = space.total.saturating_sub(space.available);
                 let fraction = used as f32 / space.total as f32;
-                ui.add(egui::ProgressBar::new(fraction).text(crate::t_format!(
-                    "{:.0}% used",
-                    "{:.0}% 已用",
-                    fraction * 100.0
-                )));
-                ui.label(crate::t_format!(
-                    "{} available ({} free) of {}",
-                    "{} 可用（{} 空闲），共 {}",
-                    format_bytes(space.available),
-                    format_bytes(space.free),
-                    format_bytes(space.total)
-                ));
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .desired_height(10.0)
+                        .corner_radius(CornerRadius::same(5))
+                        .fill(ACCENT)
+                        .text(crate::t_format!(
+                            "{:.0}% used",
+                            "{:.0}% 已用",
+                            fraction * 100.0
+                        )),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(crate::t_format!(
+                        "{} available",
+                        "{} 可用",
+                        format_bytes(space.available)
+                    ))
+                    .strong(),
+                );
+                ui.label(
+                    RichText::new(crate::t_format!(
+                        "{} free · {} total",
+                        "{} 空闲 · 共 {}",
+                        format_bytes(space.free),
+                        format_bytes(space.total)
+                    ))
+                    .size(12.0)
+                    .color(MUTED),
+                );
                 let (logical, allocated) = self.marked_sizes(tree);
                 if logical > 0 {
                     let projected = space.available.saturating_add(logical).min(space.total);
-                    ui.label(crate::t_format!(
-                        "{} marked — free space could become {}",
-                        "已标记 {} — 可用空间可变为 {}",
-                        format_bytes(logical),
-                        format_bytes(projected)
-                    ));
-                    ui.label(crate::t_format!(
-                        "{} attributed on disk, not guaranteed reclaimed space",
-                        "{} 归属磁盘占用，不保证可回收",
-                        format_bytes(allocated)
-                    ));
+                    ui.add_space(4.0);
+                    egui::Frame::new()
+                        .fill(DANGER.gamma_multiply(0.12))
+                        .corner_radius(CornerRadius::same(6))
+                        .inner_margin(Margin::same(6))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(crate::t_format!(
+                                    "{} marked — free space could become {}",
+                                    "已标记 {} — 可用空间可变为 {}",
+                                    format_bytes(logical),
+                                    format_bytes(projected)
+                                ))
+                                .size(12.0),
+                            );
+                            ui.label(
+                                RichText::new(crate::t_format!(
+                                    "{} attributed on disk, not guaranteed reclaimed space",
+                                    "{} 归属磁盘占用，不保证可回收",
+                                    format_bytes(allocated)
+                                ))
+                                .size(11.0)
+                                .color(MUTED),
+                            );
+                        });
                 }
             }
             Some(_) => {
@@ -1881,10 +2400,13 @@ impl App {
                 ));
             }
             None => {
-                ui.label(t(
-                    "Reading the capacity of the scanned volume...",
-                    "正在读取扫描卷的容量…",
-                ));
+                ui.label(
+                    RichText::new(t(
+                        "Reading the capacity of the scanned volume...",
+                        "正在读取扫描卷的容量…",
+                    ))
+                    .color(MUTED),
+                );
             }
         }
     }
@@ -1897,22 +2419,52 @@ impl App {
             return;
         };
         let name = if id == 0 {
-            tree.root.to_string_lossy().into_owned()
+            pretty_path(&tree.root)
         } else {
             node.name.to_string_lossy().into_owned()
         };
-        ui.strong(name);
-        ui.label(tree.path(id).display().to_string());
+        ui.label(RichText::new(name).size(16.0).strong());
+        ui.label(
+            RichText::new(pretty_path(&tree.path(id)))
+                .size(11.0)
+                .color(FAINT),
+        );
         let kind = crate::classify::classify(&node.name, node.is_dir);
-        ui.colored_label(kind.color(), format!("{kind:?}"));
-        ui.monospace(crate::t_format!(
-            "{} logical | {} on disk | {} files | {} dirs",
-            "{} 逻辑 | {} 磁盘 | {} 文件 | {} 目录",
-            format_bytes(node.logical),
-            format_bytes(node.allocated),
-            node.files,
-            node.directories
-        ));
+        ui.add_space(2.0);
+        crate::theme::badge(ui, format!("{kind:?}"), kind.color());
+        ui.add_space(4.0);
+        crate::theme::inset().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format_bytes(node.logical))
+                        .size(15.0)
+                        .strong(),
+                );
+                ui.label(RichText::new(t("logical", "逻辑")).size(11.0).color(MUTED));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(crate::t_format!(
+                            "{} files · {} dirs",
+                            "{} 文件 · {} 目录",
+                            node.files,
+                            node.directories
+                        ))
+                        .size(11.0)
+                        .color(MUTED),
+                    );
+                });
+            });
+            ui.label(
+                RichText::new(crate::t_format!(
+                    "{} on disk",
+                    "磁盘 {}",
+                    format_bytes(node.allocated)
+                ))
+                .size(11.0)
+                .color(MUTED),
+            );
+        });
         if let Some(rule) = self.hints.get(&id).copied() {
             ui.colored_label(
                 AMBER,
@@ -1927,13 +2479,13 @@ impl App {
                 crate::t_format!(
                     "inside marked {}",
                     "位于已标记的 {} 内",
-                    tree.path(covered).display()
+                    pretty_path(&tree.path(covered))
                 ),
             );
         }
         if !node.complete {
             ui.colored_label(
-                Color32::LIGHT_RED,
+                DANGER,
                 node_error(node, t("Contains incomplete entries", "包含不完整条目")),
             );
         }
@@ -1994,9 +2546,9 @@ impl App {
                         let label = path
                             .file_name()
                             .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| path.display().to_string());
+                            .unwrap_or_else(|| pretty_path(path));
                         ui.label(format!("{} · {}", format_bytes(logical), label))
-                            .on_hover_text(path.display().to_string());
+                            .on_hover_text(pretty_path(path));
                         if ui.small_button(t("unmark", "取消标记")).clicked() {
                             unmark = Some(*id);
                         }
@@ -2045,7 +2597,7 @@ impl App {
                             format_bytes(candidate.logical),
                             candidate.rule
                         ))
-                        .on_hover_text(candidate.path.display().to_string());
+                        .on_hover_text(pretty_path(&candidate.path));
                         if ui.small_button(t("open", "打开")).clicked() {
                             open_target = Some(candidate.node);
                         }
@@ -2087,7 +2639,7 @@ impl App {
                     .show(ui, |ui| {
                         for path in &inputs {
                             ui.horizontal(|ui| {
-                                ui.label(path.display().to_string());
+                                ui.label(pretty_path(path));
                                 if ui.small_button(t("remove", "移除")).clicked() {
                                     self.forget_target(tree, path);
                                 }
@@ -2122,7 +2674,7 @@ impl App {
                         });
                 });
                 if self.plan_data.is_some() {
-                    ui.label(RichText::new(&self.plan_details).color(Color32::LIGHT_RED));
+                    ui.label(RichText::new(&self.plan_details).color(DANGER));
                     ui.horizontal(|ui| {
                         ui.label(t("Confirmation", "确认"));
                         ui.text_edit_singleline(&mut self.confirm);
@@ -2351,7 +2903,7 @@ impl App {
         let mut open = self.duplicate_window_open;
         egui::Window::new(t("Content-verified duplicates", "内容校验一致的重复文件")).open(&mut open).resizable(true).default_size([700.0,500.0]).show(ctx,|ui| {
             ui.label(t("Select files explicitly, then create a cleanup plan. Hard links are aliases of the same file; actual reclaimed space may differ.", "请显式选择文件后再创建清理计划。硬链接是同一文件的别名，实际回收空间可能不同。"));
-            if !report.complete { ui.colored_label(Color32::LIGHT_RED,crate::t_format!("Incomplete: {} read errors or incomplete tree", "不完整: {} 个读取错误或树不完整",report.error_count)); }
+            if !report.complete { ui.colored_label(DANGER,crate::t_format!("Incomplete: {} read errors or incomplete tree", "不完整: {} 个读取错误或树不完整",report.error_count)); }
             egui::ScrollArea::vertical().show(ui,|ui| {
                 for group in &report.groups {
                     ui.separator();ui.strong(crate::t_format!("{} bytes — {} independent files — SHA-256 {}", "{} 字节 — {} 个独立文件 — SHA-256 {}",group.size,group.objects.len(),group.sha256));
@@ -2366,7 +2918,7 @@ impl App {
                     }
                 }
                 if report.groups.is_empty() {ui.label(t("No content-verified duplicate files found.", "未找到内容校验一致的重复文件。"));}
-                for error in &report.errors {ui.colored_label(Color32::LIGHT_RED,error);}
+                for error in &report.errors {ui.colored_label(DANGER,error);}
             });
         });
         self.duplicate_window_open = open;
@@ -2406,8 +2958,8 @@ impl App {
         self.suggestion_rects.clear();
         egui::Window::new(t("Cleanup suggestions", "清理建议")).open(&mut open).resizable(true).default_size([760.0, 520.0]).show(ctx, |ui| {
             ui.label(t("Heuristics only. Review each path and risk; no files are selected automatically. Create a cleanup plan to verify and confirm.", "仅为启发式线索。请逐项核对路径与风险；不会自动选择任何文件。创建清理计划后校验并确认。"));
-            if !report.complete { ui.colored_label(Color32::LIGHT_RED, t("Scan incomplete; suggestions may be missing or sizes inaccurate.", "扫描不完整；建议可能缺失或大小不准确。")); }
-            if report.total_candidates > report.candidates.len() as u64 { ui.colored_label(Color32::LIGHT_RED, crate::t_format!("Showing {} of {} suggestions", "显示 {} / {} 条建议",report.candidates.len(),report.total_candidates)); }
+            if !report.complete { ui.colored_label(DANGER, t("Scan incomplete; suggestions may be missing or sizes inaccurate.", "扫描不完整；建议可能缺失或大小不准确。")); }
+            if report.total_candidates > report.candidates.len() as u64 { ui.colored_label(DANGER, crate::t_format!("Showing {} of {} suggestions", "显示 {} / {} 条建议",report.candidates.len(),report.total_candidates)); }
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for c in &report.candidates {
                     ui.separator();
@@ -2424,7 +2976,7 @@ impl App {
                     });
                     ui.label(crate::t_format!("{} | {} logical bytes | {} attributed allocated bytes | {} files{}", "{} | {} 逻辑字节 | {} 归属分配字节 | {} 个文件{}",c.rule,c.logical,c.allocated,c.files,if c.complete {""} else {" | INCOMPLETE"}));
                     ui.label(c.reason);
-                    ui.colored_label(Color32::YELLOW, c.risk);
+                    ui.colored_label(AMBER, c.risk);
                 }
                 if report.candidates.is_empty() { ui.label(t("No matching suggestions.", "没有匹配的清理建议。")); }
             });
@@ -2495,7 +3047,7 @@ impl App {
                         self.search_hit_rects.push((hit.path.clone(),response.rect));
                         if response.changed(){if selected {self.selected.push(hit.path.clone());}else{self.selected.retain(|p|p!=&hit.path);}self.plan_data=None;}
                         if ui.small_button(t("Open", "打开")).clicked(){navigate=Some(hit.node);}
-                        ui.label(crate::t_format!("{} bytes", "{} 字节",hit.logical));ui.label(hit.path.to_string_lossy());if !hit.complete {ui.colored_label(Color32::LIGHT_RED,"incomplete");}
+                        ui.label(crate::t_format!("{} bytes", "{} 字节",hit.logical));ui.label(hit.path.to_string_lossy());if !hit.complete {ui.colored_label(DANGER,"incomplete");}
                     });}
                 });
             }

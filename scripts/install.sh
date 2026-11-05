@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-version=${FILETREE233_VERSION:-v0.1.0-alpha.1}
+version=${FILETREE233_VERSION:-v0.1.0}
 case "$version" in *[!A-Za-z0-9._-]*|"") echo "Invalid version" >&2; exit 1;; esac
 release_base=${FILETREE233_RELEASE_BASE:-https://github.com/neko233-com/filetree233/releases/download}
 case "$release_base" in *'?'*|*'#'*|*'@'*|*' '*) echo 'Invalid release base' >&2; exit 1;; esac

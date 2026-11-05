@@ -40,6 +40,7 @@ Darwin)
   echo "APPL????" >"$stage/$bundle/Contents/PkgInfo"
   cp "$bin" "$stage/$bundle/Contents/MacOS/filetree233"
   chmod +x "$stage/$bundle/Contents/MacOS/filetree233"
+  cp packaging/macos/Filetree233.icns "$stage/$bundle/Contents/Resources/Filetree233.icns"
   ln -s /Applications "$stage/Applications"
   # A drag-to-Applications image; unsigned, so right-click then Open the first time.
   hdiutil create -quiet -volname "filetree233 $short" -srcfolder "$stage" -ov \

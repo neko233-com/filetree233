@@ -23,7 +23,7 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 $manifest = Get-Content Cargo.toml -Raw
 $version = [regex]::Match($manifest, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
 if (-not $version) { throw 'could not read the version from Cargo.toml' }
-# Windows Installer accepts only major.minor.build, so 0.1.0-alpha.1 installs as 0.1.0.
+# Windows Installer accepts only major.minor.build, so 0.1.0 installs as 0.1.0.
 $msiVersion = [regex]::Match($version, '^\d+\.\d+\.\d+').Value
 $arch = if ($Target.StartsWith('aarch64')) { 'arm64' } else { 'x64' }
 $exe = "target\$Target\release\filetree233.exe"
@@ -34,6 +34,9 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 }
 if (-not (Test-Path $exe)) { throw "expected $exe to exist; build did not produce it" }
+if (-not (Test-Path 'packaging\windows\filetree233.ico')) { throw 'packaging\windows\filetree233.ico is missing' }
+$info = (Get-Item $exe).VersionInfo
+if ($info.ProductName -ne 'filetree233') { throw 'the executable is missing its Windows version resources' }
 
 New-Item -ItemType Directory -Force -Path dist | Out-Null
 

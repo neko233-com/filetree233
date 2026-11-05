@@ -1,6 +1,6 @@
 # filetree233
 
-面向命令行用户和 Agent 的磁盘空间分析与清理工具，另提供可选的矩形树图形界面。当前是开发中的早期版本，尚不能替代 WizTree。
+面向命令行用户和 Agent 的磁盘空间分析与清理工具，另提供可选的矩形树图形界面。0.1.0 是首个正式版本，Windows 桌面端优先，仍不能替代 WizTree。
 
 ## 已实现
 
@@ -58,12 +58,16 @@ filetree233 gui --threads 8
 filetree233 gui --lang zh          # 界面语言：auto（默认，跟随系统）| en | zh
 ```
 
-界面支持中文和英文：默认按系统语言选择（Windows 读取系统的用户界面语言，macOS 读取 `AppleLocale`，其他平台读取 `LC_ALL` / `LC_MESSAGES` / `LANG`），工具栏右侧的 `English` / `中文` 按钮可随时切换。
+![filetree233 桌面界面](docs/screenshot-gui.png)
 
-- 矩形树使用 squarified 布局，方块面积按逻辑大小或文件分配量切换（`t`），颜色按名称分类，嵌套深度用亮度区分；清理建议命中的目录及其祖先用斜纹标注，聚焦方块描琥珀色边、已标记方块描白边，读取不完整的条目显示 `incomplete`（中文界面为“不完整”）。
-- 右侧面板显示卷容量与可用空间、当前节点信息、标记清单和清理建议；下方列表按当前指标排序。
+界面支持中文和英文：默认按系统语言选择（Windows 读取系统的用户界面语言，macOS 读取 `AppleLocale`，其他平台读取 `LC_ALL` / `LC_MESSAGES` / `LANG`），右上角的 `English` / `中文` 按钮可随时切换。
+
+- 深色界面统一使用青绿色强调色和系统字体（Windows 为 Segoe UI 与微软雅黑），目录树使用自绘的展开三角、文件夹/文件图标和路径面包屑；Windows 的 `\\?\` 前缀只用于扫描，界面上显示普通路径。
+- 矩形树使用 squarified 布局，方块面积按逻辑大小、磁盘占用或文件数切换（三个分段按钮或 `t`），颜色按名称分类，嵌套深度用亮度区分；清理建议命中的目录及其祖先用斜纹标注，聚焦方块描琥珀色边、已标记方块描白边，读取不完整的条目显示 `incomplete`（中文界面为“不完整”）。
+- 右侧卡片显示卷容量与可用空间、当前节点信息、标记清单和清理建议；下方列表按当前指标排序。空目录和扫描中都有明确的空状态提示。
 - 标记目录后 `Create cleanup plan` → 核对目录、大小和数量 → 输入确认码 → 执行并重新扫描，走的是与 CLI 相同的计划与确认流程，没有第二条删除路径。
 - 分类颜色、斜纹和清理建议都只是线索，不会自动选择或删除任何文件；归属的文件分配量不等于可回收空间。
+- 可执行文件、窗口、开始菜单快捷方式和“添加/删除程序”共用同一应用图标，并带有文件版本和产品版本信息。
 
 键盘操作：
 
@@ -99,18 +103,18 @@ Windows 的 MSI 由固定版本的 WiX v5 生成（首次运行时脚本会把�
 
 ## 一键安装
 
-六个目标：Windows、Linux、macOS 的 x64 和 ARM64。安装脚本从指定 GitHub Release 下载可执行文件和 `SHA256SUMS`，校验后安装；默认版本是 `v0.1.0-alpha.1`。该已发布的旧预览版仍包含 GUI，尚不包含本页面描述的全部新功能；当前纯命令行版本需要从源码构建，直到新版本发布。
+六个目标：Windows、Linux、macOS 的 x64 和 ARM64。安装脚本从指定 GitHub Release 下载可执行文件和 `SHA256SUMS`，校验后安装；默认版本是 `v0.1.0`。如果安装过 `0.1.0-alpha.1` 预览版，请先卸载：它与本版的 MSI 数字版本相同（`0.1.0`），Windows Installer 无法直接覆盖升级。
 
 Windows PowerShell：
 
 ```powershell
-irm https://raw.githubusercontent.com/neko233-com/filetree233/v0.1.0-alpha.1/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/neko233-com/filetree233/v0.1.0/scripts/install.ps1 | iex
 ```
 
 Linux / macOS：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/neko233-com/filetree233/v0.1.0-alpha.1/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/neko233-com/filetree233/v0.1.0/scripts/install.sh | sh
 ```
 
 安装器也支持通过 `FILETREE233_RELEASE_BASE` 指定 HTTPS Release 下载镜像（路径应对应 GitHub 的 `releases/download`）。校验文件与程序来自同一下载源，使用镜像时应确认该源可信。安装前校验 SHA-256，并在目标目录暂存后替换已有程序。
