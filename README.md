@@ -1,6 +1,15 @@
 # filetree233
 
+[![CI](https://github.com/neko233-com/filetree233/actions/workflows/ci.yml/badge.svg)](https://github.com/neko233-com/filetree233/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 面向命令行用户和 Agent 的磁盘空间分析与清理工具，另提供可选的矩形树图形界面。0.1.0 是首个正式版本，Windows 桌面端优先，仍不能替代 WizTree。
+
+## 环境要求
+
+- Rust 1.95 或更新版本（edition 2024）。
+- Windows 10/11 x64 或 ARM64；macOS 12 或更新版本；Linux 需 glibc 2.35+ 的 x64/ARM64 发行版（发布产物为 CLI）。
+- Windows 与 macOS 的发布产物包含图形界面；Linux 发布产物不启用 `gui`，无需显示服务器依赖。
 
 ## 已实现
 
@@ -101,6 +110,18 @@ Windows 的 MSI 由固定版本的 WiX v5 生成（首次运行时脚本会把�
 
 所有安装包均未签名、未公证：Windows 首次运行可能触发 SmartScreen，可右键选择“仍要运行”或改用 `msiexec /i`；macOS 首次打开会被 Gatekeeper 拦截，需要右键选择“打开”，或执行 `xattr -dr com.apple.quarantine /Applications/Filetree233.app`。一键安装脚本仍然只下载单个可执行文件并校验 SHA-256，不依赖这些安装包。
 
+## 验证与发布
+
+每次 push 和 pull request 都会运行以下门禁（见 [.github/workflows/ci.yml](.github/workflows/ci.yml)）：
+
+- `cargo fmt --all -- --check`；
+- CLI 与 GUI 的 `cargo clippy --all-targets -- -D warnings`；
+- CLI（Linux）与 GUI（Windows）的 `cargo test --locked`；
+- MSRV 1.95 的 `cargo check --locked --features gui`；
+- `cargo audit` 检查 RustSec 公告。
+
+标签发布时，六个平台分别构建并安装自己的产物，随后 `publish` 校验 14 个资产与 `SHA256SUMS`，再从 GitHub Release 实际下载安装一次。Windows 校验 exe 版本资源、开始菜单快捷方式与“添加/删除程序”信息；macOS 校验 `.icns` 与 `CFBundleIconFile`。Dependabot 每周更新 Cargo 与 GitHub Actions 依赖。
+
 ## 一键安装
 
 六个目标：Windows、Linux、macOS 的 x64 和 ARM64。安装脚本从指定 GitHub Release 下载可执行文件和 `SHA256SUMS`，校验后安装；默认版本是 `v0.1.0`。如果安装过 `0.1.0-alpha.1` 预览版，请先卸载：它与本版的 MSI 数字版本相同（`0.1.0`），Windows Installer 无法直接覆盖升级。
@@ -143,3 +164,7 @@ Windows 默认安装至 `%LOCALAPPDATA%\Programs\filetree233`；Linux/macOS 默�
 - `apply` 按计划中的模式移动到系统回收站或永久删除，可能部分成功；回收站通常不会立即释放空间，恢复受系统及回收站设置影响；Windows 网络路径不支持回收站模式。失败不会由程序自动改为永久删除。不要把计划文件交给不可信用户修改。计划拒绝磁盘根目录、当前工作目录及其祖先、重叠目录和包含计划文件的目录。
 - 新计划格式为版本 5，显式记录处置模式，并对原始文件名、文件身份、状态变更时间、类型、长度和修改时间建立指纹；版本 4 仍可使用，版本 2、3 须重新生成。无法转换为 Unicode 的路径在计划中以原始字节或 UTF-16 码元保存，并在确认时显示完整编码；系统回收站可能拒绝某些此类路径。扫描结果提供 `path_units` / `name_units`，显示文本可能包含替代字符。该指纹不读取文件内容，不能保证发现所有内容变化；校验到删除之间存在竞态。请关闭相关程序，避免扫描与不受信任进程共同写入的目录，并备份重要数据。
 - `bench` 不清理系统文件缓存，峰值内存包含整个进程及树；每次运行的 `diagnostics` 汇总不完整节点、跳过的链接、分配量错误及其他直接错误节点（不包含路径）；请分别测试冷缓存、热缓存及真实大盘，不能仅凭小目录结果推断全盘表现。尚未进行真实大盘性能和新版本发布后的各平台安装端到端测试。
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。安全问题的报告方式见 [SECURITY.md](SECURITY.md)，开发与打包约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。

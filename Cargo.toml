@@ -2,6 +2,14 @@
 name = "filetree233"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
+description = "Disk space analysis and human-confirmed cleanup with a treemap GUI, CLI and MCP server"
+license = "MIT"
+repository = "https://github.com/neko233-com/filetree233"
+homepage = "https://github.com/neko233-com/filetree233"
+readme = "README.md"
+keywords = ["disk-usage", "treemap", "cleanup", "cli", "mcp"]
+categories = ["command-line-utilities", "filesystem", "gui"]
 
 [features]
 default = []
@@ -38,3 +46,7 @@ winresource = "0.1"
 [dev-dependencies]
 filetime = "0.2.29"
 trash = "5.2.9"
+
+[profile.release]
+lto = "thin"
+strip = true

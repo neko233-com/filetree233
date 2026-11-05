@@ -109,6 +109,13 @@ jobs:
           $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
           if ($link.TargetPath -ne $installed) { throw "shortcut target '$($link.TargetPath)' is not '$installed'" }
           if (-not $link.IconLocation) { throw 'Start Menu shortcut has no icon' }
+          $arp = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' |
+            ForEach-Object { Get-ItemProperty $_.PSPath } |
+            Where-Object { $_.DisplayName -eq 'filetree233' } |
+            Select-Object -First 1
+          if (-not $arp) { throw 'Add/Remove Programs entry is missing' }
+          if (-not $arp.DisplayIcon) { throw 'Add/Remove Programs entry has no icon' }
+          if (-not $arp.Comments) { throw 'Add/Remove Programs entry has no description' }
       - name: Package macOS and Linux installers
         if: runner.os != 'Windows'
         shell: bash

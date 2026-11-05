@@ -1481,9 +1481,7 @@ impl App {
                                 egui::Align2::LEFT_CENTER,
                                 &label,
                                 egui::FontId::proportional(13.0),
-                                if selected {
-                                    crate::theme::TEXT
-                                } else if node.is_dir {
+                                if selected || node.is_dir {
                                     crate::theme::TEXT
                                 } else {
                                     MUTED

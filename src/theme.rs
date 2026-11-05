@@ -41,20 +41,21 @@ fn text_styles() -> std::collections::BTreeMap<TextStyle, FontId> {
 }
 
 fn spacing() -> egui::Spacing {
-    let mut spacing = egui::Spacing::default();
-    spacing.item_spacing = egui::vec2(8.0, 6.0);
-    spacing.button_padding = egui::vec2(10.0, 6.0);
-    spacing.window_margin = Margin::same(12);
-    spacing.menu_margin = Margin::same(6);
-    spacing.indent = 18.0;
-    spacing.interact_size = egui::vec2(44.0, 26.0);
-    spacing.combo_width = 190.0;
-    spacing.slider_width = 140.0;
-    spacing.scroll = egui::style::ScrollStyle {
-        bar_width: 8.0,
+    egui::Spacing {
+        item_spacing: egui::vec2(8.0, 6.0),
+        button_padding: egui::vec2(10.0, 6.0),
+        window_margin: Margin::same(12),
+        menu_margin: Margin::same(6),
+        indent: 18.0,
+        interact_size: egui::vec2(44.0, 26.0),
+        combo_width: 190.0,
+        slider_width: 140.0,
+        scroll: egui::style::ScrollStyle {
+            bar_width: 8.0,
+            ..Default::default()
+        },
         ..Default::default()
-    };
-    spacing
+    }
 }
 
 fn visuals() -> Visuals {

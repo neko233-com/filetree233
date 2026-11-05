@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add production gates on every push and pull request: formatting, clippy with warnings denied, CLI and GUI tests, an MSRV 1.95 check and a RustSec dependency audit. Dependabot keeps Cargo and GitHub Actions dependencies current.
+- Add the MIT license, `SECURITY.md` and `CONTRIBUTING.md`, fill in crates.io metadata and enable thin LTO with symbol stripping for release builds.
+
 ## 0.1.0 — 2026-11-05
 
 First stable release. Windows is the primary desktop target for this milestone.
