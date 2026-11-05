@@ -98,6 +98,8 @@ jobs:
           $exit = (Start-Process msiexec -Wait -PassThru -ArgumentList '/qn', '/i', "dist\$asset.msi", "/log", $log).ExitCode
           if ($exit -ne 0) { Get-Content $log -Tail 40; throw "msiexec exited with $exit" }
           $installed = Join-Path ${env:ProgramFiles} 'filetree233\filetree233.exe'
+          $launcher = Join-Path ${env:ProgramFiles} 'filetree233\filetree233-gui.exe'
+          if (-not (Test-Path $launcher)) { throw "missing GUI launcher: $launcher" }
           $actual = & $installed --version
           $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
           if ($actual -ne "filetree233 $version") { throw "installed version '$actual' does not match Cargo.toml '$version'" }
@@ -107,7 +109,8 @@ jobs:
           $shortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\filetree233.lnk'
           if (-not (Test-Path $shortcut)) { throw "missing Start Menu shortcut: $shortcut" }
           $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
-          if ($link.TargetPath -ne $installed) { throw "shortcut target '$($link.TargetPath)' is not '$installed'" }
+          if ($link.TargetPath -ne $launcher) { throw "shortcut target '$($link.TargetPath)' is not '$launcher'" }
+          if ($link.Arguments) { throw "shortcut passes unexpected arguments: '$($link.Arguments)'" }
           if (-not $link.IconLocation) { throw 'Start Menu shortcut has no icon' }
           $arp = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' |
             ForEach-Object { Get-ItemProperty $_.PSPath } |

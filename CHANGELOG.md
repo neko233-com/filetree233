@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Starting the desktop app from the Start Menu or a shortcut no longer flashes a console window: `filetree233-gui.exe`, a windowless launcher with the same icon, starts `filetree233 gui` without a console. The shortcut no longer passes arguments, and running `filetree233 gui` from a terminal keeps its console output.
+- Rebuilt the desktop visual language: a painted filetree233 mark, compact branded header, capacity cards for every volume in the idle state, a slimmer status footer, and a quieter control surface with consistent rounded pills, custom dropdowns and chevrons, and a card-based inspector. The directory tree now shows each entry's size and truncates long names with an ellipsis.
 - Add production gates on every push and pull request: formatting, clippy with warnings denied, CLI and GUI tests, an MSRV 1.95 check and a RustSec dependency audit. Dependabot keeps Cargo and GitHub Actions dependencies current.
 - Add the MIT license, `SECURITY.md` and `CONTRIBUTING.md`, fill in crates.io metadata and enable thin LTO with symbol stripping for release builds.
 - Opening the GUI from Explorer or the Start Menu no longer leaves a console window behind; a console shared with a terminal is kept for CLI output.

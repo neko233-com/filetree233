@@ -4,19 +4,19 @@ use eframe::egui::{
     Stroke, TextStyle, Visuals,
 };
 
-pub const BG: Color32 = Color32::from_rgb(16, 20, 25);
-pub const PANEL: Color32 = Color32::from_rgb(22, 27, 34);
-pub const SURFACE: Color32 = Color32::from_rgb(30, 37, 46);
-pub const SURFACE_HOVER: Color32 = Color32::from_rgb(39, 49, 60);
-pub const STROKE: Color32 = Color32::from_rgb(48, 60, 73);
-pub const TEXT: Color32 = Color32::from_rgb(230, 237, 243);
-pub const MUTED: Color32 = Color32::from_rgb(154, 169, 184);
-pub const FAINT: Color32 = Color32::from_rgb(108, 124, 140);
-pub const ACCENT: Color32 = Color32::from_rgb(63, 184, 160);
-pub const ACCENT_STRONG: Color32 = Color32::from_rgb(87, 207, 182);
-pub const ACCENT_INK: Color32 = Color32::from_rgb(8, 20, 17);
-pub const DANGER: Color32 = Color32::from_rgb(212, 106, 94);
-pub const AMBER: Color32 = Color32::from_rgb(224, 168, 76);
+pub const BG: Color32 = Color32::from_rgb(11, 15, 20);
+pub const PANEL: Color32 = Color32::from_rgb(16, 22, 29);
+pub const SURFACE: Color32 = Color32::from_rgb(23, 31, 40);
+pub const SURFACE_HOVER: Color32 = Color32::from_rgb(31, 42, 54);
+pub const STROKE: Color32 = Color32::from_rgb(38, 51, 65);
+pub const TEXT: Color32 = Color32::from_rgb(233, 240, 246);
+pub const MUTED: Color32 = Color32::from_rgb(157, 173, 189);
+pub const FAINT: Color32 = Color32::from_rgb(108, 125, 142);
+pub const ACCENT: Color32 = Color32::from_rgb(70, 211, 176);
+pub const ACCENT_STRONG: Color32 = Color32::from_rgb(111, 232, 199);
+pub const ACCENT_INK: Color32 = Color32::from_rgb(6, 32, 25);
+pub const DANGER: Color32 = Color32::from_rgb(226, 119, 111);
+pub const AMBER: Color32 = Color32::from_rgb(229, 178, 92);
 pub const HATCH: Color32 = Color32::from_rgb(232, 226, 210);
 
 /// Apply fonts, text sizes, spacing and the dark palette to the whole context.
@@ -31,27 +31,27 @@ pub fn apply(ctx: &egui::Context) {
 
 fn text_styles() -> std::collections::BTreeMap<TextStyle, FontId> {
     [
-        (TextStyle::Heading, FontId::proportional(20.0)),
+        (TextStyle::Heading, FontId::proportional(21.0)),
         (TextStyle::Body, FontId::proportional(14.0)),
         (TextStyle::Button, FontId::proportional(14.0)),
         (TextStyle::Small, FontId::proportional(11.5)),
-        (TextStyle::Monospace, FontId::monospace(13.0)),
+        (TextStyle::Monospace, FontId::monospace(12.5)),
     ]
     .into()
 }
 
 fn spacing() -> egui::Spacing {
     egui::Spacing {
-        item_spacing: egui::vec2(8.0, 6.0),
-        button_padding: egui::vec2(10.0, 6.0),
-        window_margin: Margin::same(12),
-        menu_margin: Margin::same(6),
+        item_spacing: egui::vec2(8.0, 8.0),
+        button_padding: egui::vec2(12.0, 7.0),
+        window_margin: Margin::same(14),
+        menu_margin: Margin::same(8),
         indent: 18.0,
-        interact_size: egui::vec2(44.0, 26.0),
+        interact_size: egui::vec2(48.0, 30.0),
         combo_width: 190.0,
         slider_width: 140.0,
         scroll: egui::style::ScrollStyle {
-            bar_width: 8.0,
+            bar_width: 9.0,
             ..Default::default()
         },
         ..Default::default()
@@ -72,8 +72,8 @@ fn visuals() -> Visuals {
     visuals.warn_fg_color = AMBER;
     visuals.error_fg_color = DANGER;
     visuals.window_stroke = Stroke::new(1.0_f32, STROKE);
-    visuals.window_corner_radius = CornerRadius::same(10);
-    visuals.menu_corner_radius = CornerRadius::same(8);
+    visuals.window_corner_radius = CornerRadius::same(14);
+    visuals.menu_corner_radius = CornerRadius::same(11);
     visuals.window_shadow = Shadow {
         offset: [0, 10],
         blur: 28,
@@ -94,31 +94,31 @@ fn visuals() -> Visuals {
     widgets.noninteractive.weak_bg_fill = PANEL;
     widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, STROKE);
     widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT);
-    widgets.noninteractive.corner_radius = CornerRadius::same(6);
+    widgets.noninteractive.corner_radius = CornerRadius::same(9);
 
     widgets.inactive.bg_fill = SURFACE;
     widgets.inactive.weak_bg_fill = SURFACE;
     widgets.inactive.bg_stroke = Stroke::new(1.0_f32, STROKE);
     widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT);
-    widgets.inactive.corner_radius = CornerRadius::same(6);
+    widgets.inactive.corner_radius = CornerRadius::same(9);
 
     widgets.hovered.bg_fill = SURFACE_HOVER;
     widgets.hovered.weak_bg_fill = SURFACE_HOVER;
     widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.65));
     widgets.hovered.fg_stroke = Stroke::new(1.0_f32, TEXT);
-    widgets.hovered.corner_radius = CornerRadius::same(6);
+    widgets.hovered.corner_radius = CornerRadius::same(9);
 
     widgets.active.bg_fill = ACCENT.gamma_multiply(0.55).to_opaque();
     widgets.active.weak_bg_fill = ACCENT.gamma_multiply(0.55).to_opaque();
     widgets.active.bg_stroke = Stroke::new(1.0_f32, ACCENT);
     widgets.active.fg_stroke = Stroke::new(1.0_f32, TEXT);
-    widgets.active.corner_radius = CornerRadius::same(6);
+    widgets.active.corner_radius = CornerRadius::same(9);
 
     widgets.open.bg_fill = SURFACE_HOVER;
     widgets.open.weak_bg_fill = SURFACE_HOVER;
     widgets.open.bg_stroke = Stroke::new(1.0_f32, STROKE);
     widgets.open.fg_stroke = Stroke::new(1.0_f32, TEXT);
-    widgets.open.corner_radius = CornerRadius::same(6);
+    widgets.open.corner_radius = CornerRadius::same(9);
     visuals
 }
 
@@ -189,16 +189,79 @@ pub fn card() -> egui::Frame {
     egui::Frame::new()
         .fill(SURFACE)
         .stroke(Stroke::new(1.0_f32, STROKE))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::same(10))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(Margin::same(14))
 }
 
 /// A quiet inset used inside cards for rows and readouts.
 pub fn inset() -> egui::Frame {
     egui::Frame::new()
         .fill(BG)
-        .corner_radius(CornerRadius::same(6))
-        .inner_margin(Margin::symmetric(8, 6))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::symmetric(10, 8))
+}
+
+/// Quiet button for secondary actions.
+pub fn ghost_button(ui: &mut egui::Ui, label: impl Into<egui::WidgetText>) -> egui::Response {
+    ui.add(
+        egui::Button::new(label)
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0_f32, STROKE))
+            .corner_radius(CornerRadius::same(9))
+            .min_size(egui::vec2(0.0, 30.0)),
+    )
+}
+
+/// Rounded toggle used for boolean view options.
+pub fn toggle_chip(
+    ui: &mut egui::Ui,
+    selected: bool,
+    label: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    ui.add(
+        egui::Button::new(label)
+            .fill(if selected {
+                ACCENT.gamma_multiply(0.16)
+            } else {
+                SURFACE
+            })
+            .stroke(Stroke::new(
+                1.0_f32,
+                if selected {
+                    ACCENT.gamma_multiply(0.7)
+                } else {
+                    STROKE
+                },
+            ))
+            .corner_radius(CornerRadius::same(9))
+            .min_size(egui::vec2(0.0, 28.0)),
+    )
+}
+
+/// A dropdown-style button with a trailing chevron.
+pub fn dropdown_button(
+    ui: &mut egui::Ui,
+    label: impl Into<egui::WidgetText>,
+    width: f32,
+) -> egui::Response {
+    let response = ui.add(
+        egui::Button::new(label)
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0_f32, STROKE))
+            .corner_radius(CornerRadius::same(9))
+            .wrap_mode(egui::TextWrapMode::Truncate)
+            .min_size(egui::vec2(width, 30.0)),
+    );
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            response.rect.right_center() + egui::vec2(-17.0, -2.0),
+            response.rect.right_center() + egui::vec2(-9.0, -2.0),
+            response.rect.right_center() + egui::vec2(-13.0, 2.5),
+        ],
+        MUTED,
+        Stroke::NONE,
+    ));
+    response
 }
 
 /// Draw a small rounded badge with a label; returns the response for tooltips.

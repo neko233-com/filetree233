@@ -27,6 +27,7 @@ if (-not $version) { throw 'could not read the version from Cargo.toml' }
 $msiVersion = [regex]::Match($version, '^\d+\.\d+\.\d+').Value
 $arch = if ($Target.StartsWith('aarch64')) { 'arm64' } else { 'x64' }
 $exe = "target\$Target\release\filetree233.exe"
+$launcher = "target\$Target\release\filetree233-gui.exe"
 $asset = "filetree233-windows-$arch"
 
 if (-not $SkipBuild) {
@@ -34,6 +35,7 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 }
 if (-not (Test-Path $exe)) { throw "expected $exe to exist; build did not produce it" }
+if (-not (Test-Path $launcher)) { throw "expected $launcher to exist; build did not produce it" }
 if (-not (Test-Path 'packaging\windows\filetree233.ico')) { throw 'packaging\windows\filetree233.ico is missing' }
 $info = (Get-Item $exe).VersionInfo
 if ($info.ProductName -ne 'filetree233') { throw 'the executable is missing its Windows version resources' }
@@ -45,6 +47,7 @@ $staging = "dist\$asset"
 if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
 New-Item -ItemType Directory -Force -Path $staging | Out-Null
 Copy-Item (Resolve-Path $exe) -Destination $staging
+Copy-Item (Resolve-Path $launcher) -Destination $staging
 foreach ($document in 'README.md', 'CHANGELOG.md', 'RELEASE_NOTES.md') {
     if (Test-Path $document) { Copy-Item $document -Destination $staging }
 }
@@ -68,6 +71,7 @@ if (-not (Test-Path $wix)) { throw 'wix.exe is still missing after installation;
     -o "dist\$asset.msi" `
     -d "ProductVersion=$msiVersion" `
     -d "SourcePath=$(Resolve-Path $exe)" `
+    -d "GuiSourcePath=$(Resolve-Path $launcher)" `
     -pdbtype none
 if ($LASTEXITCODE -ne 0) { throw 'wix build failed' }
 

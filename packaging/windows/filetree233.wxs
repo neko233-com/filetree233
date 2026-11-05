@@ -4,6 +4,7 @@
   Rendered by scripts/package.ps1, which passes:
     ProductVersion  numeric major.minor.build (Windows Installer rejects -alpha suffixes)
     SourcePath      path to the freshly built filetree233.exe
+    GuiSourcePath   path to the windowless filetree233-gui.exe launcher
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="filetree233" Language="1033" Manufacturer="neko233"
@@ -35,9 +36,14 @@
         <Environment Id="InstallFolderOnPath" Name="PATH" Value="[INSTALLFOLDER]"
                      Permanent="no" Part="last" Action="set" System="yes" />
       </Component>
+      <!-- The windowless launcher is a second versioned file, so it needs its own
+           component; WiX cannot auto-generate a guid for a multi-file component. -->
+      <Component Id="GuiLauncher" Guid="{2f6b8e14-7c3d-4a92-b5e1-9d0c6f4a8b23}">
+        <File Source="$(var.GuiSourcePath)" KeyPath="yes" />
+      </Component>
       <Component Id="StartMenu" Guid="*">
         <Shortcut Id="AppShortcut" Directory="ProgramMenuFolder" Name="filetree233"
-                  Target="[INSTALLFOLDER]filetree233.exe" Arguments="gui"
+                  Target="[INSTALLFOLDER]filetree233-gui.exe"
                   WorkingDirectory="INSTALLFOLDER" Icon="AppIcon.ico" />
         <RemoveFolder Id="RemoveStartMenuFolder" Directory="ProgramMenuFolder" On="uninstall" />
         <RegistryValue Root="HKCU" Key="Software\neko233\filetree233" Name="startMenu"
