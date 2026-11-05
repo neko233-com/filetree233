@@ -4,9 +4,9 @@
 
 .DESCRIPTION
   One-command local packaging for the Windows targets in .github/workflows/release.yml.
-  The MSI uses a pinned WiX v5 toolset in target\wix, installed on demand; v6 and later
-  demand acceptance of the Open Source Maintenance Fee EULA. Nothing is code signed, so
-  SmartScreen warns on first run.
+  The MSI uses a pinned WiX v5 toolset under %LOCALAPPDATA%\filetree233\wix, installed on
+  demand; v6 and later demand acceptance of the Open Source Maintenance Fee EULA.
+  Nothing is code signed, so SmartScreen warns on first run.
 
 .EXAMPLE
   ./scripts/package.ps1
@@ -49,11 +49,13 @@ Compress-Archive -Path "$staging\*" -DestinationPath "dist\$asset.zip" -Force
 Remove-Item -Recurse -Force $staging
 
 # MSI through the pinned WiX command line. v6 and later refuse to run until the
-# Open Source Maintenance Fee EULA is accepted, so builds stay on v5.
-$wixRoot = Join-Path $PWD 'target\wix'
+# Open Source Maintenance Fee EULA is accepted, so builds stay on v5. Keep the tool
+# outside the repository: a build cache can restore it without its NuGet assets.
+$wixRoot = Join-Path $env:LOCALAPPDATA 'filetree233\wix'
 $wix = Join-Path $wixRoot 'wix.exe'
 if (-not (Test-Path $wix)) {
-    Write-Warning 'wix.exe not found; installing the WiX v5 toolset into target\wix'
+    if (Test-Path $wixRoot) { Remove-Item -Recurse -Force $wixRoot }
+    Write-Warning 'wix.exe not found; installing the WiX v5 toolset into the user profile'
     dotnet tool install wix --version '5.*' --tool-path $wixRoot
     if ($LASTEXITCODE -ne 0) { throw 'could not install the WiX v5 toolset; install the .NET SDK and retry' }
 }

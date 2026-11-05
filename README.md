@@ -93,7 +93,7 @@ TARGET=aarch64-apple-darwin bash scripts/package.sh   # macOS：.app + DMG
 bash scripts/package.sh                               # Linux：tar.gz（含 install.sh）
 ```
 
-Windows 的 MSI 由固定版本的 WiX v5 生成（首次运行时脚本会把工具装到 `target\wix`，避免新版 WiX 的 OSMF 许可确认），安装时会把程序目录加入系统 `PATH` 并创建开始菜单快捷方式（启动 GUI）。macOS 的 DMG 内是 `.app` 加拖拽到“应用程序”的别名。
+Windows 的 MSI 由固定版本的 WiX v5 生成（首次运行时脚本会把工具装到 `%LOCALAPPDATA%\filetree233\wix`，避免新版 WiX 的 OSMF 许可确认），安装时会把程序目录加入系统 `PATH` 并创建开始菜单快捷方式（启动 GUI）。macOS 的 DMG 内是 `.app` 加拖拽到“应用程序”的别名。
 
 所有安装包均未签名、未公证：Windows 首次运行可能触发 SmartScreen，可右键选择“仍要运行”或改用 `msiexec /i`；macOS 首次打开会被 Gatekeeper 拦截，需要右键选择“打开”，或执行 `xattr -dr com.apple.quarantine /Applications/Filetree233.app`。一键安装脚本仍然只下载单个可执行文件并校验 SHA-256，不依赖这些安装包。
 
