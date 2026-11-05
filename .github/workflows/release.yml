@@ -190,7 +190,7 @@ jobs:
           test "$(find . -maxdepth 1 -type f | wc -l)" -eq 14
           sha256sum filetree233-* > SHA256SUMS
           sha256sum -c SHA256SUMS
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           prerelease: ${{ contains(github.ref_name, '-') }}
           body_path: RELEASE_NOTES.md
