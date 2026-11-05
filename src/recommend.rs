@@ -9,6 +9,8 @@ use std::{
 const MAX_CANDIDATES: usize = 10_000;
 #[derive(Debug)]
 pub struct Candidate {
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub node: u32,
     pub path: PathBuf,
     pub rule: &'static str,
     pub reason: &'static str,
@@ -202,6 +204,7 @@ pub fn analyze_controlled(
             |Reverse((logical, Reverse(path), id, rule, reason, risk))| {
                 let node = &tree.nodes[id as usize];
                 Candidate {
+                    node: id,
                     path,
                     rule,
                     reason,

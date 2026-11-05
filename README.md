@@ -1,12 +1,12 @@
 # filetree233
 
-面向命令行用户和 Agent 的磁盘空间分析与清理工具。当前是开发中的早期版本，尚不能替代 WizTree。
+面向命令行用户和 Agent 的磁盘空间分析与清理工具，另提供可选的矩形树图形界面。当前是开发中的早期版本，尚不能替代 WizTree。
 
 ## 已实现
 
 - 磁盘总览：列出已发现的卷及总容量、可用空间，也可查询任意指定路径的文件系统容量。
 - 普通遍历支持并行构建完整目录快照，显示逻辑大小和文件分配量；支持全树搜索、CSV / JSONL 导出、重复文件检查、清理建议与清理计划。Windows NTFS MFT 实验引擎的结果标记为不完整。
-- CLI：`scan`、`tree`、`duplicates`、`search`、`recommend`、`plan`、`apply`；MCP stdio 也提供这些操作。
+- CLI：`scan`、`tree`、`duplicates`、`search`、`recommend`、`plan`、`apply`、`gui`；MCP stdio 也提供除 GUI 外的这些操作。
 - 清理必须先生成计划；执行前展示目录、大小和数量，人工输入确认码后再次检查计划与目录，再按计划移入回收站或永久删除；默认回收站；计划展示逻辑大小和去重后的文件分配量。MCP 客户端不支持 elicitation 时拒绝执行。
 - 扫描跳过符号链接及 Windows reparse point，保留其他可见文件大小并标记不完整；创建计划时遇到不可读取项或链接则拒绝。
 
@@ -45,6 +45,57 @@ filetree233 serve               # MCP stdio
 离线 `mft-inspect` 按 JSON Lines 流式输出已导出的逻辑 MFT 记录、无效槽及最终统计；记录大小必须由来源确认，不能自行猜测。该接口会输出文件名等元数据，包含用于保留原始名称的 UTF-16 码元。`mft-volume` 可只读访问 NTFS 挂载卷的 MFT，Windows 通常要求管理员权限；这是原始记录检查接口，不提供目录汇总或清理计划。`--fast` 使用批量读取，可能跳过损坏记录或遗漏扩展属性，无法统计跳过的数量，结果始终标记不完整；默认模式提供逐条错误信息。离线解析不能证明记录完整，也不能替代实时卷扫描或作为删除依据。
 
 性能测量方法和一次小目录实测见 [docs/performance.md](docs/performance.md)。
+
+## 图形界面
+
+GUI 是独立的 cargo feature，默认构建不包含它，命令行用户无需安装任何图形依赖：
+
+```sh
+cargo build --release --locked --features gui
+filetree233 gui                    # 打开窗口后选择卷或目录
+filetree233 gui D:\Data            # 启动即扫描该目录
+filetree233 gui --threads 8
+filetree233 gui --lang zh          # 界面语言：auto（默认，跟随系统）| en | zh
+```
+
+界面支持中文和英文：默认按系统语言选择（Windows 读取系统的用户界面语言，macOS 读取 `AppleLocale`，其他平台读取 `LC_ALL` / `LC_MESSAGES` / `LANG`），工具栏右侧的 `English` / `中文` 按钮可随时切换。
+
+- 矩形树使用 squarified 布局，方块面积按逻辑大小或文件分配量切换（`t`），颜色按名称分类，嵌套深度用亮度区分；清理建议命中的目录及其祖先用斜纹标注，聚焦方块描琥珀色边、已标记方块描白边，读取不完整的条目显示 `incomplete`（中文界面为“不完整”）。
+- 右侧面板显示卷容量与可用空间、当前节点信息、标记清单和清理建议；下方列表按当前指标排序。
+- 标记目录后 `Create cleanup plan` → 核对目录、大小和数量 → 输入确认码 → 执行并重新扫描，走的是与 CLI 相同的计划与确认流程，没有第二条删除路径。
+- 分类颜色、斜纹和清理建议都只是线索，不会自动选择或删除任何文件；归属的文件分配量不等于可回收空间。
+
+键盘操作：
+
+| 按键 | 作用 |
+| --- | --- |
+| 单击 / Ctrl+单击 | 进入目录 / 仅标记目录 |
+| 空格 / `x` | 标记或取消聚焦项 / 标记后返回上级 |
+| 回车 / 方向键 / `Tab` | 进入目录 / 在方块间移动焦点 / 在本级条目间循环 |
+| Backspace / `g` / `Esc` | 返回上级 / 回到扫描根 / 先关窗口再返回上级 |
+| `t` / `i` / `[` `]` | 切换面积指标 / 忽略点号开头 / 增减绘制层数 |
+| `c` / `o` / `r` | 核对标记 / 在文件管理器中显示 / 重新扫描 |
+| `/` 或 `h` / `q` | 按键说明 / 退出 |
+
+Linux 的发布产物不启用 `gui`，以避免显示服务器依赖导致构建或运行失败；需要在 Linux 使用 GUI 时自行加 `--features gui` 构建。
+
+## 安装包
+
+本地一条命令打包，产物写入 `dist/` 并打印 SHA-256：
+
+```powershell
+./scripts/package.ps1                              # Windows x64：zip + MSI
+./scripts/package.ps1 -Target aarch64-pc-windows-msvc
+```
+
+```sh
+TARGET=aarch64-apple-darwin bash scripts/package.sh   # macOS：.app + DMG
+bash scripts/package.sh                               # Linux：tar.gz（含 install.sh）
+```
+
+Windows 的 MSI 由 WiX v4/v5 生成（缺失时脚本会执行 `dotnet tool install --global wix`），安装时会把程序目录加入系统 `PATH` 并创建开始菜单快捷方式（启动 GUI）。macOS 的 DMG 内是 `.app` 加拖拽到“应用程序”的别名。
+
+所有安装包均未签名、未公证：Windows 首次运行可能触发 SmartScreen，可右键选择“仍要运行”或改用 `msiexec /i`；macOS 首次打开会被 Gatekeeper 拦截，需要右键选择“打开”，或执行 `xattr -dr com.apple.quarantine /Applications/Filetree233.app`。一键安装脚本仍然只下载单个可执行文件并校验 SHA-256，不依赖这些安装包。
 
 ## 一键安装
 

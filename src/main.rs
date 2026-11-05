@@ -1,6 +1,12 @@
 mod allocation;
 mod benchmark;
+#[cfg(feature = "gui")]
+mod classify;
 mod duplicates;
+#[cfg(feature = "gui")]
+mod gui;
+#[cfg(feature = "gui")]
+mod i18n;
 mod mcp_jobs;
 mod mft;
 #[cfg(any(windows, test))]
@@ -11,6 +17,8 @@ mod recommend;
 mod recycle;
 mod search;
 mod tree;
+#[cfg(feature = "gui")]
+mod treemap;
 mod volumes;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
@@ -35,8 +43,26 @@ enum ScanEngine {
     Mft,
     Auto,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum GuiLang {
+    /// Follow the operating system language.
+    Auto,
+    En,
+    Zh,
+}
 #[derive(Subcommand)]
 enum Command {
+    /// Open the interactive treemap desktop app.
+    Gui {
+        /// Directory to scan on launch; omit to pick a volume or folder in the window.
+        path: Option<PathBuf>,
+        /// Parallel top-level workers (1-32).
+        #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=32))]
+        threads: u8,
+        /// Interface language; `auto` follows the operating system.
+        #[arg(long, value_enum, default_value_t = GuiLang::Auto)]
+        lang: GuiLang,
+    },
     /// List mounted volumes and available capacity.
     Volumes,
     /// Query filesystem capacity for an explicit path, including mounts not in the automatic list.
@@ -940,6 +966,22 @@ fn serve() -> Result<(), String> {
     }
     Ok(())
 }
+#[cfg(feature = "gui")]
+fn run_gui(path: Option<&Path>, threads: u8, lang: GuiLang) -> Result<(), String> {
+    i18n::set(match lang {
+        GuiLang::Auto => i18n::detect(),
+        GuiLang::En => i18n::Lang::En,
+        GuiLang::Zh => i18n::Lang::Zh,
+    });
+    gui::run(path, threads)
+}
+#[cfg(not(feature = "gui"))]
+fn run_gui(_: Option<&Path>, _: u8, _: GuiLang) -> Result<(), String> {
+    Err(
+        "this build has no graphical interface; build with `--features gui` or use the command line"
+            .into(),
+    )
+}
 fn main() {
     let Some(command) = Cli::parse().command else {
         Cli::command().print_help().expect("print command help");
@@ -995,6 +1037,7 @@ fn main() {
         Command::Plan { paths, output, mode } => save_plan_mode(&paths, &output, mode)
             .map(|v| println!("{}", serde_json::to_string_pretty(&v).unwrap())),
         Command::Apply { plan } => apply(&plan),
+        Command::Gui { path, threads, lang } => run_gui(path.as_deref(), threads, lang),
         Command::Serve => serve(),
     };
     if let Err(e) = result {

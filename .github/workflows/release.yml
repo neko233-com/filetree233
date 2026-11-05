@@ -14,30 +14,37 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux ships CLI-only: no display-server libraries to link, so no GUI feature.
           - os: windows-2025
             target: x86_64-pc-windows-msvc
             asset: filetree233-windows-x64.exe
             exe: filetree233.exe
+            features: '--features gui'
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
             asset: filetree233-windows-arm64.exe
             exe: filetree233.exe
+            features: '--features gui'
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             asset: filetree233-linux-x64
             exe: filetree233
+            features: ''
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             asset: filetree233-linux-arm64
             exe: filetree233
+            features: ''
           - os: macos-14
             target: aarch64-apple-darwin
             asset: filetree233-macos-arm64
             exe: filetree233
+            features: '--features gui'
           - os: macos-15-intel
             target: x86_64-apple-darwin
             asset: filetree233-macos-x64
             exe: filetree233
+            features: '--features gui'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -47,25 +54,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - run: cargo test --release --locked --target ${{ matrix.target }}
+      - run: cargo test --release --locked --target ${{ matrix.target }} ${{ matrix.features }}
       - name: Verify real NTFS fast path
         if: runner.os == 'Windows'
         timeout-minutes: 10
         env:
           FILETREE233_TEST_LIVE_MFT: '1'
           FILETREE233_TEST_FAST_ONLY: '1'
-        run: cargo test --release --locked --target ${{ matrix.target }} --test mft_live -- --nocapture
+        run: cargo test --release --locked --target ${{ matrix.target }} ${{ matrix.features }} --test mft_live -- --nocapture
       - name: Verify MFT cancellation and failure handling
         if: runner.os == 'Windows'
         timeout-minutes: 5
         env:
           FILETREE233_TEST_LIVE_MFT: '1'
-        run: cargo test --release --locked --target ${{ matrix.target }} --bin filetree233 live_parallel_cancellation_and_errors -- --nocapture
-      - run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo test --release --locked --target ${{ matrix.target }} ${{ matrix.features }} --bin filetree233 live_parallel_cancellation_and_errors -- --nocapture
+      - run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.features }}
       - name: Verify installers with the actual release executable
         env:
           FILETREE233_INSTALL_TEST_BINARY: target/${{ matrix.target }}/release/${{ matrix.exe }}
-        run: cargo test --release --locked --target ${{ matrix.target }} --test installer -- --ignored --nocapture
+        run: cargo test --release --locked --target ${{ matrix.target }} ${{ matrix.features }} --test installer -- --ignored --nocapture
       - shell: bash
         run: |
           "target/${{ matrix.target }}/release/${{ matrix.exe }}" --version
@@ -74,6 +81,65 @@ jobs:
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
+          if-no-files-found: error
+      - name: Package Windows installers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 15
+        run: ./scripts/package.ps1 -Target '${{ matrix.target }}' -SkipBuild
+      - name: Verify the MSI installs and runs
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arch = if ('${{ matrix.target }}'.StartsWith('aarch64')) { 'arm64' } else { 'x64' }
+          $asset = "filetree233-windows-$arch"
+          $log = Join-Path $env:RUNNER_TEMP 'msi-install.log'
+          $exit = (Start-Process msiexec -Wait -PassThru -ArgumentList '/qn', '/i', "dist\$asset.msi", "/log", $log).ExitCode
+          if ($exit -ne 0) { Get-Content $log -Tail 40; throw "msiexec exited with $exit" }
+          $installed = Join-Path ${env:ProgramFiles} 'filetree233\filetree233.exe'
+          $actual = & $installed --version
+          $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          if ($actual -ne "filetree233 $version") { throw "installed version '$actual' does not match Cargo.toml '$version'" }
+      - name: Package macOS and Linux installers
+        if: runner.os != 'Windows'
+        shell: bash
+        timeout-minutes: 15
+        env:
+          SKIP_BUILD: '1'
+          TARGET: ${{ matrix.target }}
+        run: bash ./scripts/package.sh
+      - name: Verify the bundled installer
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+          aarch64-*) arch=arm64 ;;
+          x86_64-*) arch=x64 ;;
+          esac
+          case "$(uname -s)" in
+          Darwin)
+            asset="filetree233-macos-$arch"
+            mount="$RUNNER_TEMP/ft233-mount"
+            hdiutil attach -nobrowse -quiet -mountpoint "$mount" "dist/$asset.dmg"
+            trap 'hdiutil detach -quiet "$mount" || true' EXIT
+            test -x "$mount/Filetree233.app/Contents/MacOS/filetree233"
+            "$mount/Filetree233.app/Contents/MacOS/filetree233" --version
+            ;;
+          Linux)
+            asset="filetree233-linux-$arch"
+            tar -xzf "dist/$asset.tar.gz" -C "$RUNNER_TEMP"
+            test -x "$RUNNER_TEMP/$asset/filetree233"
+            "$RUNNER_TEMP/$asset/filetree233" --version
+            ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}-installers
+          path: dist/*
           if-no-files-found: error
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -90,8 +156,20 @@ jobs:
       - name: Check assets and hashes
         shell: bash
         run: |
+          set -euo pipefail
           cd artifacts
-          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 6
+          # Six raw binaries plus the installers built by scripts/package.(ps1|sh).
+          for asset in \
+            filetree233-windows-x64.exe filetree233-windows-arm64.exe \
+            filetree233-linux-x64 filetree233-linux-arm64 \
+            filetree233-macos-x64 filetree233-macos-arm64 \
+            filetree233-windows-x64.zip filetree233-windows-arm64.zip \
+            filetree233-windows-x64.msi filetree233-windows-arm64.msi \
+            filetree233-linux-x64.tar.gz filetree233-linux-arm64.tar.gz \
+            filetree233-macos-x64.dmg filetree233-macos-arm64.dmg; do
+            test -s "$asset" || { echo "missing release asset: $asset" >&2; exit 1; }
+          done
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 14
           sha256sum filetree233-* > SHA256SUMS
           sha256sum -c SHA256SUMS
       - uses: softprops/action-gh-release@v2

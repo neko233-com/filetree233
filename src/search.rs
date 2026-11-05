@@ -20,6 +20,8 @@ pub struct Options {
 }
 #[derive(Debug)]
 pub struct Hit {
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub node: u32,
     pub path: PathBuf,
     pub is_dir: bool,
     pub logical: u64,
@@ -100,6 +102,7 @@ pub fn find_controlled(
         .map(|(_, id)| {
             let node = &tree.nodes[id as usize];
             Hit {
+                node: id,
                 path: tree.path(id),
                 is_dir: node.is_dir,
                 logical: node.logical,

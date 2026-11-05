@@ -457,7 +457,7 @@ impl<W: std::io::Write> std::io::Write for CancelWriter<'_, W> {
         self.inner.flush()
     }
 }
-fn export_snapshot_controlled(
+pub(crate) fn export_snapshot_controlled(
     snapshot: &Snapshot,
     output: &Path,
     format: ExportFormat,
